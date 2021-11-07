@@ -15,9 +15,11 @@ import (
 )
 
 const (
-	sizeChan = 0
-	profit   = 100
-	timeOut  = 120
+	sizeChan       = 0
+	profit         = 190
+	timeOut        = 120
+	pauseAfterDeal = 30
+	Quantity       = 0.01
 )
 
 type Bot struct {
@@ -26,6 +28,8 @@ type Bot struct {
 	orderChan    chan *Order
 	Symbol       string // trading pair
 	lastTimeDeal int64  // unix time from last deal
+
+	wg *sync.WaitGroup
 }
 
 type Order struct {
@@ -41,22 +45,21 @@ func NewBot(client *binance.Client, cfg *configs.BotConfig) *Bot {
 	bot.analysisСhan = make(chan *binance.WsAggTradeEvent, sizeChan)
 	bot.orderChan = make(chan *Order, sizeChan)
 	bot.Symbol = cfg.Symbol
+	bot.wg = &sync.WaitGroup{}
 
 	return &bot
 }
 
 func (o *Bot) Start() {
-	var wg sync.WaitGroup
-
-	wg.Add(1)
+	o.wg.Add(1)
 
 	go o.Analyze()
 
-	wg.Add(1)
+	o.wg.Add(1)
 
 	go o.Trade()
 
-	wg.Wait()
+	o.wg.Wait()
 
 	log.Println("Bot stop work")
 }
@@ -69,7 +72,7 @@ func StartPricesStream(analysisСhan chan *binance.WsAggTradeEvent) chan struct{
 		log.Println(err)
 	}
 
-	doneC, _, err := binance.WsAggTradeServe("BTCUSDT", wsAggTradeHandler, errHandler)
+	doneC, _, err := binance.WsAggTradeServe("BTCBUSD", wsAggTradeHandler, errHandler)
 	if err != nil {
 		log.Println(err)
 		return nil
@@ -79,6 +82,8 @@ func StartPricesStream(analysisСhan chan *binance.WsAggTradeEvent) chan struct{
 }
 
 func (o *Bot) Analyze() {
+	defer o.wg.Done()
+
 	wsAggTradeHandler := func(event *binance.WsAggTradeEvent) {
 		o.analysisСhan <- event
 	}
@@ -87,7 +92,7 @@ func (o *Bot) Analyze() {
 		log.Println(err)
 	}
 
-	doneC, _, err := binance.WsAggTradeServe("BTCUSDT", wsAggTradeHandler, errHandler)
+	doneC, _, err := binance.WsAggTradeServe("BTCBUSD", wsAggTradeHandler, errHandler)
 	if err != nil {
 		log.Println(err)
 		return
@@ -101,23 +106,19 @@ func (o *Bot) Analyze() {
 	timer2 := time.NewTimer(time.Second * 60)
 	timer3 := time.NewTimer(time.Second * 60)
 
-	log.Println("oldEvent = ", oldEvent)
 	log.Println("Start trading")
 
 	for {
 		select {
 		case <-timer.C:
-			log.Printf("timer 1")
 			o.MakeDecision(oldEvent)
 
 			timer.Reset(time.Second * timeOut)
 		case <-timer2.C:
-			log.Printf("timer 2")
 			o.MakeDecision(oldEvent2)
 
 			timer2.Reset(time.Second * timeOut)
 		case <-timer3.C:
-			log.Printf("timer 3")
 			o.MakeDecision(oldEvent3)
 
 			timer3.Reset(time.Second * 60)
@@ -125,8 +126,12 @@ func (o *Bot) Analyze() {
 			select {
 			case <-doneC:
 				log.Println("doneC send event")
-				break
 
+				o.wg.Add(1)
+
+				go o.Analyze()
+
+				return
 			case <-o.analysisСhan:
 				continue
 			}
@@ -142,11 +147,27 @@ func (o *Bot) MakeDecision(oldEvent *binance.WsAggTradeEvent) {
 	difference := newEventPrice / oldEventPrice * 100
 	log.Println("difference = ", difference)
 
-	if difference < 99.91 {
+	if difference < 99.7 {
 		order := Order{
 			Symbol:   newEvent.Symbol,
 			Price:    newEventPrice,
-			Quantity: 0.001,
+			Quantity: 0.02,
+		}
+
+		o.orderChan <- &order
+	} else if difference < 99.89 {
+		order := Order{
+			Symbol:   newEvent.Symbol,
+			Price:    newEventPrice,
+			Quantity: 0.01,
+		}
+
+		o.orderChan <- &order
+	} else if difference < 99.91 {
+		order := Order{
+			Symbol:   newEvent.Symbol,
+			Price:    newEventPrice,
+			Quantity: 0.003,
 		}
 
 		o.orderChan <- &order
@@ -156,12 +177,14 @@ func (o *Bot) MakeDecision(oldEvent *binance.WsAggTradeEvent) {
 }
 
 func (o *Bot) Trade() {
+	defer o.wg.Done()
+
 	for order := range o.orderChan {
 		log.Printf("order: %v\n", order)
 
 		timeFromLastDeal := (time.Now().Unix() - o.lastTimeDeal)
-		if timeFromLastDeal < 60 {
-			log.Printf("order: %v skip, %v time has passed since the last deal s\n", order, timeFromLastDeal)
+		if timeFromLastDeal < pauseAfterDeal {
+			log.Printf("order: %v skip, %vs has passed since the last deal s\n", order, timeFromLastDeal)
 			continue
 		}
 
@@ -241,16 +264,15 @@ func (o *Bot) GetAccountInfo() func(http.ResponseWriter, *http.Request) {
 			return
 		}
 
-		var usdt binance.Balance
+		var notZeroAssets []binance.Balance
 
 		for _, ass := range res.Balances {
-			if ass.Asset == "USDT" {
-				usdt = ass
-				break
+			if ass.Asset == "BUSD" || ass.Asset == "BTC" {
+				notZeroAssets = append(notZeroAssets, ass)
 			}
 		}
 
-		bb, err := json.Marshal(usdt)
+		bb, err := json.Marshal(notZeroAssets)
 		if err != nil {
 			log.Printf("json.Marshal(model) err: %v\n", err)
 		}

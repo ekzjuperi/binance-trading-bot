@@ -16,10 +16,10 @@ func main() {
 		log.Fatalf("configs.GetConfig() err: %v", err)
 	}
 
-	binance.UseTestnet = true
+	//binance.UseTestnet = false
 
 	client := binance.NewClient(cfg.APIKey, cfg.SecretKey)
-	log.Println(*cfg)
+	//log.Println(*cfg)
 
 	bot := b.NewBot(client, cfg)
 
