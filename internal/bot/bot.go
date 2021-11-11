@@ -16,10 +16,11 @@ import (
 
 const (
 	sizeChan       = 0
-	profit         = 190
+	profit         = 250
 	timeOut        = 120
-	pauseAfterDeal = 30
+	pauseAfterDeal = 65
 	Quantity       = 0.01
+	stopPrice      = 66900
 )
 
 type Bot struct {
@@ -28,6 +29,7 @@ type Bot struct {
 	orderChan    chan *Order
 	Symbol       string // trading pair
 	lastTimeDeal int64  // unix time from last deal
+	stopPrice    float64
 
 	wg *sync.WaitGroup
 }
@@ -45,6 +47,7 @@ func NewBot(client *binance.Client, cfg *configs.BotConfig) *Bot {
 	bot.analysisСhan = make(chan *binance.WsAggTradeEvent, sizeChan)
 	bot.orderChan = make(chan *Order, sizeChan)
 	bot.Symbol = cfg.Symbol
+	bot.stopPrice = stopPrice
 	bot.wg = &sync.WaitGroup{}
 
 	return &bot
@@ -147,15 +150,13 @@ func (o *Bot) MakeDecision(oldEvent *binance.WsAggTradeEvent) {
 	difference := newEventPrice / oldEventPrice * 100
 	log.Println("difference = ", difference)
 
-	if difference < 99.7 {
-		order := Order{
-			Symbol:   newEvent.Symbol,
-			Price:    newEventPrice,
-			Quantity: 0.02,
-		}
+	if newEventPrice > o.stopPrice {
+		*oldEvent = *newEvent
 
-		o.orderChan <- &order
-	} else if difference < 99.89 {
+		return
+	}
+
+	if difference < 99.7 {
 		order := Order{
 			Symbol:   newEvent.Symbol,
 			Price:    newEventPrice,
@@ -163,7 +164,15 @@ func (o *Bot) MakeDecision(oldEvent *binance.WsAggTradeEvent) {
 		}
 
 		o.orderChan <- &order
-	} else if difference < 99.91 {
+	} else if difference < 99.82 {
+		order := Order{
+			Symbol:   newEvent.Symbol,
+			Price:    newEventPrice,
+			Quantity: 0.005,
+		}
+
+		o.orderChan <- &order
+	} else if difference < 99.89 {
 		order := Order{
 			Symbol:   newEvent.Symbol,
 			Price:    newEventPrice,
@@ -193,6 +202,7 @@ func (o *Bot) Trade() {
 			log.Printf("An error occurred during order execution, order: %v, err: %v\n", order, err)
 			continue
 		}
+
 
 		log.Printf("Order %v executed\n", order)
 
@@ -303,6 +313,31 @@ func (o *Bot) ListOpenOrders() func(http.ResponseWriter, *http.Request) {
 		}
 
 		_, err = resWriter.Write(bb)
+		if err != nil {
+			log.Printf("resWriter.Write() err: %v\n", err)
+		}
+	}
+}
+
+func (o *Bot) SetStopPrice() func(http.ResponseWriter, *http.Request) {
+	return func(resWriter http.ResponseWriter, req *http.Request) {
+		query := req.URL.Query()
+		price := query["price"][0]
+
+		if price == "" {
+			_, err := resWriter.Write([]byte(fmt.Sprintf("incorrect stop price = %v", price)))
+			if err != nil {
+				log.Printf("resWriter.Write() err: %v\n", err)
+			}
+
+			return
+		}
+
+		stopPriceFloat, _ := strconv.ParseFloat(price, 32)
+
+		o.stopPrice = stopPriceFloat
+
+		_, err := resWriter.Write([]byte(fmt.Sprintf("stop price now %v", stopPriceFloat)))
 		if err != nil {
 			log.Printf("resWriter.Write() err: %v\n", err)
 		}

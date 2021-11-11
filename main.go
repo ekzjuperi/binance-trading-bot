@@ -19,7 +19,6 @@ func main() {
 	//binance.UseTestnet = false
 
 	client := binance.NewClient(cfg.APIKey, cfg.SecretKey)
-	//log.Println(*cfg)
 
 	bot := b.NewBot(client, cfg)
 
