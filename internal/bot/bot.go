@@ -21,7 +21,7 @@ import (
 
 const (
 	sizeChan       = 100
-	profit         = 240
+	profit         = 190
 	timeOut        = 120
 	pauseAfterDeal = 65
 	Quantity       = 0.01
@@ -226,8 +226,8 @@ func (o *Bot) Trade() {
 			o.rwm.Unlock()
 		}
 
-		if (o.lastDealPrice != 0) && order.Price > o.lastDealPrice {
-			log.Printf("order: %v skip, order.Price(%v) > o.lastDealPrice(%v)\n", order, order.Price, o.lastDealPrice)
+		if (o.lastDealPrice != 0) && order.Price >= o.lastDealPrice {
+			log.Printf("order: %v skip, order.Price(%v) >= o.lastDealPrice(%v)\n", order, order.Price, o.lastDealPrice)
 			continue
 		}
 
@@ -256,6 +256,7 @@ func (o *Bot) Trade() {
 
 		o.rwm.Lock()
 		o.lastTimeDeal = time.Now().Unix()
+		o.lastDealPrice = order.Price
 		o.rwm.Unlock()
 
 		go func(firstOrderResolve *binance.CreateOrderResponse, order *Order) {
@@ -597,19 +598,90 @@ func (o *Bot) GetProfitStatictics() func(http.ResponseWriter, *http.Request) {
 			return
 		}
 
+		if len(trades) == 0 {
+			_, err = resWriter.Write([]byte("No deals"))
+			if err != nil {
+				log.Printf("GetProfitStatictics() resWriter.Write(totalProfit) err: %v\n", err)
+			}
+
+			return
+		}
+
 		sort.SliceStable(trades, func(i, j int) bool {
-			return trades[i].ExiteOrder.Time < trades[j].ExiteOrder.Time
+			return trades[i].ExiteOrder.UpdateTime < trades[j].ExiteOrder.UpdateTime
 		})
 
-		for _, trade := range trades {
-			tm := time.Unix((trade.ExiteOrder.Time / int64(time.Microsecond)), 0)
+		totalProfit := float64(0)
+		dayProfit := float64(0)
 
-			res := fmt.Sprintf("%v quantity:%s profit: %.2f\n", tm, trade.ExiteOrder.ExecutedQuantity[:7], trade.Profit)
+		firstData := time.Unix((trades[0].ExiteOrder.UpdateTime / int64(time.Microsecond)), 0)
+
+		previousDay := firstData.Format("02-01-06")
+
+		currentDay := ""
+
+		res := fmt.Sprintf("Day %v \n", previousDay)
+
+		_, err = resWriter.Write([]byte(res))
+		if err != nil {
+			log.Printf("GetProfitStatictics() resWriter.Write(firstDay) err: %v\n", err)
+		}
+
+		for i, trade := range trades {
+			tm := time.Unix((trade.ExiteOrder.UpdateTime / int64(time.Microsecond)), 0)
+
+			currentDay = tm.Format("02-01-06")
+
+			if currentDay != previousDay {
+				res = fmt.Sprintf("Day profit: %.2f\n\n", dayProfit)
+
+				_, err = resWriter.Write([]byte(res))
+				if err != nil {
+					log.Printf("GetProfitStatictics() resWriter.Write(totalProfit) err: %v\n", err)
+				}
+
+				res = fmt.Sprintf("Day %v \n", currentDay)
+
+				_, err = resWriter.Write([]byte(res))
+				if err != nil {
+					log.Printf("GetProfitStatictics() resWriter.Write(currentDay) err: %v\n", err)
+				}
+
+				previousDay = currentDay
+
+				dayProfit = 0
+			}
+
+			totalProfit += trade.Profit
+			dayProfit += trade.Profit
+
+			res = fmt.Sprintf("%v quantity:%s profit: %.2f\n", tm.Format("02-01-06 15:04"), trade.ExiteOrder.ExecutedQuantity[:6], trade.Profit)
 
 			_, err = resWriter.Write([]byte(res))
 			if err != nil {
-				log.Printf("GetProfitStatictics() resWriter.Write() err: %v\n", err)
+				log.Printf("GetProfitStatictics() resWriter.Write(trade) err: %v\n", err)
 			}
+
+			if i == len(trades)-1 {
+				res = fmt.Sprintf("Day profit: %.2f\n", dayProfit)
+
+				_, err = resWriter.Write([]byte(res))
+				if err != nil {
+					log.Printf("GetProfitStatictics() resWriter.Write(dayProfit) err: %v\n", err)
+				}
+			}
+		}
+
+		_, err = resWriter.Write([]byte("\n"))
+		if err != nil {
+			log.Printf("GetProfitStatictics() resWriter.Write(totalProfit) err: %v\n", err)
+		}
+
+		res = fmt.Sprintf("Total profit: %.2f\n", totalProfit)
+
+		_, err = resWriter.Write([]byte(res))
+		if err != nil {
+			log.Printf("GetProfitStatictics() resWriter.Write(totalProfit) err: %v\n", err)
 		}
 	}
 }
