@@ -20,12 +20,13 @@ import (
 )
 
 const (
-	sizeChan       = 100
-	profit         = 190
-	timeOut        = 120
-	pauseAfterDeal = 65
-	Quantity       = 0.01
-	stopPrice      = 66900
+	sizeChan            = 100
+	profit              = 190
+	timeOut             = 120
+	pauseAfterDeal      = 65
+	Quantity            = 0.01
+	stopPrice           = 66900
+	timeoutFromLastDeal = 1800
 )
 
 type Bot struct {
@@ -220,7 +221,7 @@ func (o *Bot) Trade() {
 			continue
 		}
 
-		if timeFromLastDeal >= 3600 {
+		if timeFromLastDeal >= timeoutFromLastDeal {
 			o.rwm.Lock()
 			o.lastDealPrice = 0
 			o.rwm.Unlock()
@@ -251,7 +252,13 @@ func (o *Bot) Trade() {
 		firstOrderResolve, err := o.CreateOrder(order, binance.SideTypeBuy, binance.OrderTypeLimitMaker, binance.TimeInForceTypeGTC)
 		if err != nil {
 			log.Printf("An error occurred during order execution, order: %v, err: %v\n", order, err)
-			continue
+
+			firstOrderResolve, order, err = o.retryCreateOrder(order)
+			if err != nil {
+				fmt.Println(err)
+
+				continue
+			}
 		}
 
 		o.rwm.Lock()
@@ -684,4 +691,47 @@ func (o *Bot) GetProfitStatictics() func(http.ResponseWriter, *http.Request) {
 			log.Printf("GetProfitStatictics() resWriter.Write(totalProfit) err: %v\n", err)
 		}
 	}
+}
+
+func (o *Bot) retryCreateOrder(order *Order) (*binance.CreateOrderResponse, *Order, error) {
+	firstErrTime := time.Now().Unix()
+
+	for time.Now().Unix()-firstErrTime <= 3 {
+		time.Sleep(time.Second * 1)
+
+		depth, err := o.client.NewDepthService().Symbol(order.Symbol).
+			Do(context.Background())
+
+		if err != nil {
+			log.Printf("o.client.NewDepthService(%v) err: %v\n", order.Symbol, err)
+
+			continue
+		}
+
+		price, err := strconv.ParseFloat(depth.Bids[0].Price, 32)
+		if err != nil {
+			log.Printf("strconv.ParseFloat(depth.Bids[0].Price) err: %v\n", err)
+
+			continue
+		}
+
+		if price-order.Price > 10 {
+			log.Printf("newPrice: %v > oldPrice: %v\n", price, order.Price)
+
+			continue
+		}
+
+		order.Price = price
+
+		firstOrderResolve, err := o.CreateOrder(order, binance.SideTypeBuy, binance.OrderTypeLimitMaker, binance.TimeInForceTypeGTC)
+		if err != nil {
+			log.Printf("An error occurred during order execution, order: %v, err: %v\n", order, err)
+
+			continue
+		}
+
+		return firstOrderResolve, order, nil
+	}
+
+	return nil, nil, fmt.Errorf("Number of attempts to create an order %v exceeded", order)
 }
