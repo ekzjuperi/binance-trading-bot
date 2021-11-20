@@ -66,10 +66,11 @@ func NewBot(client *binance.Client, cfg *configs.BotConfig) *Bot {
 	bot.orderChan = make(chan *Order, sizeChan)
 	bot.compleatedTradeChan = make(chan *CompleatedTrade, sizeChan)
 	bot.Symbol = cfg.Symbol
-	bot.stopPrice = stopPrice
 
 	bot.wg = &sync.WaitGroup{}
 	bot.rwm = &sync.RWMutex{}
+
+	bot.getStopPrice()
 
 	return &bot
 }
@@ -126,9 +127,14 @@ func (o *Bot) Analyze() {
 	oldEvent2 := <-o.analysisСhan
 	oldEvent3 := <-o.analysisСhan
 
+	price, _ := strconv.ParseFloat(oldEvent.Price, 32)
+
+	o.lastTradePrice = price
+
 	timer := time.NewTimer(time.Second * timeOutForTimer)
 	timer2 := time.NewTimer(time.Second * 60)
 	timer3 := time.NewTimer(time.Second * 60)
+	timer4 := time.NewTimer(time.Minute * 5)
 
 	log.Println("Start trading")
 
@@ -145,6 +151,10 @@ func (o *Bot) Analyze() {
 		case <-timer3.C:
 			o.MakeDecision(oldEvent3)
 			timer3.Reset(time.Second * 60)
+
+		case <-timer4.C:
+			o.getStopPrice()
+			timer4.Reset(time.Minute * 5)
 
 		default:
 			select {
@@ -173,7 +183,7 @@ func (o *Bot) MakeDecision(oldEvent *binance.WsAggTradeEvent) {
 	difference := newEventPrice / oldEventPrice * 100
 	log.Println("newEventPrice = ", newEventPrice)
 
-	if newEventPrice > o.stopPrice {
+	if newEventPrice >= o.stopPrice {
 		*oldEvent = *newEvent
 
 		return
@@ -240,14 +250,12 @@ func (o *Bot) Trade() {
 			Do(context.Background())
 		if err != nil {
 			log.Printf("o.client.NewDepthService(%v) err: %v\n", order.Symbol, err)
-
 			continue
 		}
 
 		price, err := strconv.ParseFloat(depth.Bids[0].Price, 32)
 		if err != nil {
 			log.Printf("strconv.ParseFloat(depth.Bids[0].Price) err: %v\n", err)
-
 			continue
 		}
 
@@ -255,7 +263,7 @@ func (o *Bot) Trade() {
 
 		// create order
 		firstOrderResolve, err := o.CreateOrder(order, binance.SideTypeBuy, binance.OrderTypeLimitMaker, binance.TimeInForceTypeGTC)
-		if err.Error() == "<APIError> code=-2010, msg=Account has insufficient balance for requested action." {
+		if err != nil && err.Error() == "<APIError> code=-2010, msg=Account has insufficient balance for requested action." {
 			log.Printf("Account has insufficient balance for buy %v\n", order)
 
 			continue
@@ -275,7 +283,7 @@ func (o *Bot) Trade() {
 
 		o.rwm.Lock()
 		o.lastTimeTrade = time.Now().Unix()
-		o.lastTradePrice = order.Price
+		o.lastTradePrice = order.Price - profit
 		o.rwm.Unlock()
 
 		go func(firstOrderResolve *binance.CreateOrderResponse, order *Order) {
@@ -294,6 +302,7 @@ func (o *Bot) Trade() {
 				}
 
 				if entryBinanceOrder.Status == binance.OrderStatusTypeFilled {
+					log.Printf("entry order execute price: %v, quantity: %v", entryBinanceOrder.Price, entryBinanceOrder.ExecutedQuantity)
 					break
 				}
 
@@ -304,6 +313,11 @@ func (o *Bot) Trade() {
 						log.Println(err)
 						continue
 					}
+
+					o.rwm.Lock()
+					o.lastTimeTrade = 0
+					o.lastTradePrice = order.Price + profit
+					o.rwm.Unlock()
 
 					log.Printf("order %v canceled after timeout", order)
 
@@ -456,8 +470,19 @@ func (o *Bot) CheckLimitOrder() {
 
 					o.rwm.Lock()
 					o.cache.SaveCache()
-					o.lastTradePrice = newlastTradePrice - float64(profit)
+
+					if o.lastTradePrice == 0 {
+						o.lastTradePrice = newlastTradePrice - profit
+					}
+
+					o.lastTimeTrade = time.Now().Unix()
 					o.rwm.Unlock()
+
+					log.Printf("exite order execute price: %v, quantity: %v profit %v",
+						binanceOrder.Price,
+						binanceOrder.ExecutedQuantity,
+						compleatedTrade.Profit,
+					)
 				}
 			}
 		}
@@ -748,5 +773,52 @@ func (o *Bot) retryCreateOrder(order *Order) (*binance.CreateOrderResponse, *Ord
 		return firstOrderResolve, order, nil
 	}
 
-	return nil, nil, fmt.Errorf("Number of attempts to create an order %v exceeded", order)
+	return nil, nil, fmt.Errorf("number of attempts to create an order %v exceeded", order)
+}
+
+func (o *Bot) getStopPrice() {
+	last24Hours := time.Now().UnixNano()/(int64(time.Millisecond)/int64(time.Nanosecond)) - int64(1000*24*60*60)
+
+	klines, err := o.client.NewKlinesService().Symbol(o.Symbol).StartTime(last24Hours).Interval("15m").Do(context.Background())
+	if err != nil {
+		log.Printf("o.client.NewKlinesService(%v) err: %v\n", o.Symbol, err)
+		return
+	}
+
+	minPrice := float64(0)
+	maxPrice := float64(0)
+
+	for _, kline := range klines {
+		priceHigh, err := strconv.ParseFloat(kline.High, 32)
+		if err != nil {
+			log.Printf("getStopPrice() strconv.ParseFloat(%v, 32)) err: %v\n", kline.High, err)
+			return
+		}
+
+		priceLow, err := strconv.ParseFloat(kline.Low, 32)
+		if err != nil {
+			log.Printf("getStopPrice() strconv.ParseFloat(%v, 32)) err: %v\n", kline.Low, err)
+			return
+		}
+
+		if minPrice == 0 && priceLow != 0 {
+			minPrice = priceLow
+		}
+
+		if priceHigh > maxPrice {
+			maxPrice = priceHigh
+		}
+
+		if priceLow < minPrice {
+			minPrice = priceLow
+		}
+	}
+
+	stopPrice := maxPrice - ((maxPrice - minPrice) * 0.3)
+
+	o.rwm.Lock()
+	o.stopPrice = stopPrice
+	o.rwm.Unlock()
+
+	log.Printf("new stop price: %v\n", stopPrice)
 }
