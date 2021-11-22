@@ -17,28 +17,28 @@ import (
 	"github.com/adshao/go-binance/v2"
 	"github.com/ekzjuperi/binance-trading-bot/configs"
 	"github.com/ekzjuperi/binance-trading-bot/internal/cache"
+	"github.com/ekzjuperi/binance-trading-bot/internal/utils"
 )
 
 const (
 	sizeChan                         = 100
-	profit                           = 220
-	timeOutForTimer                  = 120
-	pauseAfterTrade                  = 120
+	profit                           = 340
+	timeOutForTimer                  = 180
+	pauseAfterTrade                  = 180
 	Quantity                         = 0.01
-	stopPrice                        = 61500
 	timeUntilLastTradePriceWillReset = 2000 //  time after the last trade price is reset
 )
 
 type Bot struct {
-	cache               *cache.Cache
-	client              *binance.Client
-	analysisСhan        chan *binance.WsAggTradeEvent
-	orderChan           chan *Order
-	compleatedTradeChan chan *CompleatedTrade
-	Symbol              string // trading pair
-	lastTimeTrade       int64  // unix time from last trade
-	stopPrice           float64
-	lastTradePrice      float64
+	cache          *cache.Cache
+	client         *binance.Client
+	analysisСhan   chan *binance.WsAggTradeEvent
+	orderChan      chan *Order
+	fullTradeChan  chan *FullTrade
+	Symbol         string // trading pair
+	lastTimeTrade  int64  // unix time from last trade
+	stopPrice      float64
+	lastTradePrice float64
 
 	wg  *sync.WaitGroup
 	rwm *sync.RWMutex
@@ -50,7 +50,7 @@ type Order struct {
 	Quantity float64
 }
 
-type CompleatedTrade struct {
+type FullTrade struct {
 	EnterOrder *binance.Order
 	ExiteOrder *binance.Order
 	Profit     float64
@@ -64,19 +64,19 @@ func NewBot(client *binance.Client, cfg *configs.BotConfig) *Bot {
 	bot.client = client
 	bot.analysisСhan = make(chan *binance.WsAggTradeEvent, sizeChan)
 	bot.orderChan = make(chan *Order, sizeChan)
-	bot.compleatedTradeChan = make(chan *CompleatedTrade, sizeChan)
+	bot.fullTradeChan = make(chan *FullTrade, sizeChan)
 	bot.Symbol = cfg.Symbol
 
 	bot.wg = &sync.WaitGroup{}
 	bot.rwm = &sync.RWMutex{}
-
-	bot.getStopPrice()
 
 	return &bot
 }
 
 // Start func start bot.
 func (o *Bot) Start() {
+	go o.getStopPrice()
+
 	o.wg.Add(1)
 
 	go o.Analyze()
@@ -126,15 +126,18 @@ func (o *Bot) Analyze() {
 	oldEvent := <-o.analysisСhan
 	oldEvent2 := <-o.analysisСhan
 	oldEvent3 := <-o.analysisСhan
+	oldEvent4 := <-o.analysisСhan
+	oldEvent5 := <-o.analysisСhan
 
 	price, _ := strconv.ParseFloat(oldEvent.Price, 32)
 
 	o.lastTradePrice = price
 
-	timer := time.NewTimer(time.Second * timeOutForTimer)
-	timer2 := time.NewTimer(time.Second * 60)
+	timer := time.NewTimer(time.Second * 120)
+	timer2 := time.NewTimer(time.Second * 90)
 	timer3 := time.NewTimer(time.Second * 60)
-	timer4 := time.NewTimer(time.Minute * 5)
+	timer4 := time.NewTimer(time.Second * 30)
+	timer5 := time.NewTimer(time.Second * 0)
 
 	log.Println("Start trading")
 
@@ -150,11 +153,15 @@ func (o *Bot) Analyze() {
 
 		case <-timer3.C:
 			o.MakeDecision(oldEvent3)
-			timer3.Reset(time.Second * 60)
+			timer3.Reset(time.Second * timeOutForTimer)
 
 		case <-timer4.C:
-			o.getStopPrice()
-			timer4.Reset(time.Minute * 5)
+			o.MakeDecision(oldEvent4)
+			timer4.Reset(time.Second * timeOutForTimer)
+
+		case <-timer5.C:
+			o.MakeDecision(oldEvent5)
+			timer5.Reset(time.Second * timeOutForTimer)
 
 		default:
 			select {
@@ -183,39 +190,40 @@ func (o *Bot) MakeDecision(oldEvent *binance.WsAggTradeEvent) {
 	difference := newEventPrice / oldEventPrice * 100
 	log.Println("newEventPrice = ", newEventPrice)
 
-	if newEventPrice >= o.stopPrice {
-		*oldEvent = *newEvent
-
-		return
-	}
-
-	if difference < 99.7 {
-		order := Order{
+	var order *Order
+	if difference < 99.61 {
+		order = &Order{
 			Symbol:   newEvent.Symbol,
 			Price:    newEventPrice,
-			Quantity: 0.05,
+			Quantity: 0.005,
 		}
-
-		o.orderChan <- &order
-	} else if difference < 99.82 {
-		order := Order{
+	} else if difference < 99.75 {
+		order = &Order{
+			Symbol:   newEvent.Symbol,
+			Price:    newEventPrice,
+			Quantity: 0.004,
+		}
+	} else if difference < 99.85 {
+		order = &Order{
 			Symbol:   newEvent.Symbol,
 			Price:    newEventPrice,
 			Quantity: 0.003,
 		}
-
-		o.orderChan <- &order
-	} else if difference < 99.89 {
-		order := Order{
-			Symbol:   newEvent.Symbol,
-			Price:    newEventPrice,
-			Quantity: 0.002,
-		}
-
-		o.orderChan <- &order
 	}
 
 	*oldEvent = *newEvent
+
+	if order == nil {
+		return
+	}
+
+	if newEventPrice >= o.stopPrice {
+		log.Printf("order %v skip, price(%v) > o.stopPrice(%v)\n", order, order.Price, o.stopPrice)
+
+		return
+	}
+
+	o.orderChan <- order
 }
 
 func (o *Bot) Trade() {
@@ -283,7 +291,7 @@ func (o *Bot) Trade() {
 
 		o.rwm.Lock()
 		o.lastTimeTrade = time.Now().Unix()
-		o.lastTradePrice = order.Price - profit
+		o.lastTradePrice = order.Price - (profit / 2)
 		o.rwm.Unlock()
 
 		go func(firstOrderResolve *binance.CreateOrderResponse, order *Order) {
@@ -347,12 +355,12 @@ func (o *Bot) Trade() {
 					continue
 				}
 
-				cTrade := &CompleatedTrade{
+				cTrade := &FullTrade{
 					EnterOrder: entryBinanceOrder,
 					ExiteOrder: exitBinanceOrder,
 				}
 
-				o.compleatedTradeChan <- cTrade
+				o.fullTradeChan <- cTrade
 
 				break
 			}
@@ -444,29 +452,34 @@ func (o *Bot) CheckLimitOrder() {
 					continue
 				}
 
-				var compleatedTrade CompleatedTrade
+				var fullTrade FullTrade
 
-				err = json.Unmarshal(b, &compleatedTrade)
+				err = json.Unmarshal(b, &fullTrade)
 				if err != nil {
-					log.Printf("json.Unmarshal(b, compleatedTrade) err: %v\n", err)
+					log.Printf("json.Unmarshal(b, FullTrade) err: %v\n", err)
 
 					continue
 				}
 
-				binanceOrder, ok := listBinanceOrders[fmt.Sprintf("%v", compleatedTrade.ExiteOrder.OrderID)]
+				binanceOrder, ok := listBinanceOrders[fmt.Sprintf("%v", fullTrade.ExiteOrder.OrderID)]
 				if !ok {
-					log.Printf("listBinanceOrders didn't have awaitingOrder")
+					log.Printf("listBinanceOrders didn't have awaitingOrder:%v", fullTrade.ExiteOrder.OrderID)
 					continue
 				}
 
 				if binanceOrder.Status == binance.OrderStatusTypeFilled {
-					compleatedTrade.ExiteOrder = binanceOrder
-					compleatedTrade.Profit = calculateProfit(compleatedTrade)
-					SaveCompleatedTradeInFile(compleatedTrade)
+					fullTrade.ExiteOrder = binanceOrder
 
-					o.cache.Cache.Delete(fmt.Sprintf("%v", compleatedTrade.ExiteOrder.OrderID))
+					fullTrade.Profit = utils.CalculateProfit(
+						fullTrade.EnterOrder.CummulativeQuoteQuantity,
+						fullTrade.ExiteOrder.CummulativeQuoteQuantity,
+					)
 
-					newlastTradePrice, _ := strconv.ParseFloat(compleatedTrade.ExiteOrder.Price, 32)
+					SaveFullTradeInFile(fullTrade)
+
+					o.cache.Cache.Delete(fmt.Sprintf("%v", fullTrade.ExiteOrder.OrderID))
+
+					newlastTradePrice, _ := strconv.ParseFloat(fullTrade.ExiteOrder.Price, 32)
 
 					o.rwm.Lock()
 					o.cache.SaveCache()
@@ -481,14 +494,14 @@ func (o *Bot) CheckLimitOrder() {
 					log.Printf("exite order execute price: %v, quantity: %v profit %v",
 						binanceOrder.Price,
 						binanceOrder.ExecutedQuantity,
-						compleatedTrade.Profit,
+						fullTrade.Profit,
 					)
 				}
 			}
 		}
 	}()
 
-	for compleatedOrder := range o.compleatedTradeChan {
+	for compleatedOrder := range o.fullTradeChan {
 		err := o.cache.Cache.Add(fmt.Sprintf("%v", compleatedOrder.ExiteOrder.OrderID), compleatedOrder, 0)
 		if err != nil {
 			log.Printf("o.cache.Cache.Add() err: %v\n", err)
@@ -500,7 +513,7 @@ func (o *Bot) CheckLimitOrder() {
 	}
 }
 
-func SaveCompleatedTradeInFile(compleatedTrade CompleatedTrade) {
+func SaveFullTradeInFile(fullTrade FullTrade) {
 	file, err := os.OpenFile("statistics/trade-statistics.json", os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		log.Printf("os.OpenFile(trade-statistics.json) err: %v\n", err)
@@ -508,9 +521,9 @@ func SaveCompleatedTradeInFile(compleatedTrade CompleatedTrade) {
 
 	defer file.Close()
 
-	b, err := json.Marshal(compleatedTrade)
+	b, err := json.Marshal(fullTrade)
 	if err != nil {
-		log.Printf("json.Marshal(compleatedTrade) err: %v\n", err)
+		log.Printf("json.Marshal(fullTrade) err: %v\n", err)
 		return
 	}
 
@@ -521,13 +534,6 @@ func SaveCompleatedTradeInFile(compleatedTrade CompleatedTrade) {
 	if _, err = io.WriteString(file, string(b)); err != nil {
 		log.Printf("f.Write(string(b)) err: %v\n", err)
 	}
-}
-
-func calculateProfit(compleatedTrade CompleatedTrade) float64 {
-	EnterCummulativeQuoteQuantity, _ := strconv.ParseFloat(compleatedTrade.EnterOrder.CummulativeQuoteQuantity, 32)
-	ExiteCummulativeQuoteQuantity, _ := strconv.ParseFloat(compleatedTrade.ExiteOrder.CummulativeQuoteQuantity, 32)
-
-	return ExiteCummulativeQuoteQuantity - EnterCummulativeQuoteQuantity
 }
 
 func (o *Bot) GetAccountInfo() func(http.ResponseWriter, *http.Request) {
@@ -610,7 +616,7 @@ func (o *Bot) SetStopPrice() func(http.ResponseWriter, *http.Request) {
 
 func (o *Bot) GetProfitStatictics() func(http.ResponseWriter, *http.Request) {
 	return func(resWriter http.ResponseWriter, req *http.Request) {
-		trades := []*CompleatedTrade{}
+		trades := []*FullTrade{}
 
 		jsonFile, err := os.Open("statistics/trade-statistics.json")
 		if err != nil {
@@ -626,7 +632,7 @@ func (o *Bot) GetProfitStatictics() func(http.ResponseWriter, *http.Request) {
 				continue
 			}
 
-			trade := &CompleatedTrade{}
+			trade := &FullTrade{}
 
 			err = json.Unmarshal([]byte(fileScanner.Text()), &trade)
 			if err != nil {
@@ -736,7 +742,7 @@ func (o *Bot) GetProfitStatictics() func(http.ResponseWriter, *http.Request) {
 func (o *Bot) retryCreateOrder(order *Order) (*binance.CreateOrderResponse, *Order, error) {
 	firstErrTime := time.Now().Unix()
 
-	for time.Now().Unix()-firstErrTime <= 3 {
+	for time.Now().Unix()-firstErrTime <= 5 {
 		time.Sleep(time.Second * 1)
 
 		depth, err := o.client.NewDepthService().Symbol(order.Symbol).
@@ -777,48 +783,52 @@ func (o *Bot) retryCreateOrder(order *Order) (*binance.CreateOrderResponse, *Ord
 }
 
 func (o *Bot) getStopPrice() {
-	last24Hours := time.Now().UnixNano()/(int64(time.Millisecond)/int64(time.Nanosecond)) - int64(1000*24*60*60)
+	for {
+		last24Hours := time.Now().UnixNano()/(int64(time.Millisecond)/int64(time.Nanosecond)) - int64(1000*24*60*60)
 
-	klines, err := o.client.NewKlinesService().Symbol(o.Symbol).StartTime(last24Hours).Interval("15m").Do(context.Background())
-	if err != nil {
-		log.Printf("o.client.NewKlinesService(%v) err: %v\n", o.Symbol, err)
-		return
-	}
-
-	minPrice := float64(0)
-	maxPrice := float64(0)
-
-	for _, kline := range klines {
-		priceHigh, err := strconv.ParseFloat(kline.High, 32)
+		klines, err := o.client.NewKlinesService().Symbol(o.Symbol).StartTime(last24Hours).Interval("15m").Do(context.Background())
 		if err != nil {
-			log.Printf("getStopPrice() strconv.ParseFloat(%v, 32)) err: %v\n", kline.High, err)
+			log.Printf("o.client.NewKlinesService(%v) err: %v\n", o.Symbol, err)
 			return
 		}
 
-		priceLow, err := strconv.ParseFloat(kline.Low, 32)
-		if err != nil {
-			log.Printf("getStopPrice() strconv.ParseFloat(%v, 32)) err: %v\n", kline.Low, err)
-			return
+		minPrice := float64(0)
+		maxPrice := float64(0)
+
+		for _, kline := range klines {
+			priceHigh, err := strconv.ParseFloat(kline.High, 32)
+			if err != nil {
+				log.Printf("getStopPrice() strconv.ParseFloat(%v, 32)) err: %v\n", kline.High, err)
+				return
+			}
+
+			priceLow, err := strconv.ParseFloat(kline.Low, 32)
+			if err != nil {
+				log.Printf("getStopPrice() strconv.ParseFloat(%v, 32)) err: %v\n", kline.Low, err)
+				return
+			}
+
+			if minPrice == 0 && priceLow != 0 {
+				minPrice = priceLow
+			}
+
+			if priceHigh > maxPrice {
+				maxPrice = priceHigh
+			}
+
+			if priceLow < minPrice {
+				minPrice = priceLow
+			}
 		}
 
-		if minPrice == 0 && priceLow != 0 {
-			minPrice = priceLow
-		}
+		stopPrice := maxPrice - ((maxPrice - minPrice) * 0.50)
 
-		if priceHigh > maxPrice {
-			maxPrice = priceHigh
-		}
+		o.rwm.Lock()
+		o.stopPrice = stopPrice
+		o.rwm.Unlock()
 
-		if priceLow < minPrice {
-			minPrice = priceLow
-		}
+		log.Printf("new stop price: %v\n", stopPrice)
+
+		time.Sleep(time.Minute * 5)
 	}
-
-	stopPrice := maxPrice - ((maxPrice - minPrice) * 0.3)
-
-	o.rwm.Lock()
-	o.stopPrice = stopPrice
-	o.rwm.Unlock()
-
-	log.Printf("new stop price: %v\n", stopPrice)
 }
