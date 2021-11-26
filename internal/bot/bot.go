@@ -2,6 +2,7 @@ package bot
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -22,11 +23,11 @@ import (
 
 const (
 	sizeChan                         = 100
-	profit                           = 340
+	profit                           = 360
 	timeOutForTimer                  = 180
 	pauseAfterTrade                  = 180
 	Quantity                         = 0.01
-	timeUntilLastTradePriceWillReset = 2000 //  time after the last trade price is reset
+	timeUntilLastTradePriceWillReset = 2500 //  time after the last trade price is reset
 )
 
 type Bot struct {
@@ -195,19 +196,19 @@ func (o *Bot) MakeDecision(oldEvent *binance.WsAggTradeEvent) {
 		order = &Order{
 			Symbol:   newEvent.Symbol,
 			Price:    newEventPrice,
-			Quantity: 0.005,
+			Quantity: 0.0055,
 		}
 	} else if difference < 99.75 {
 		order = &Order{
 			Symbol:   newEvent.Symbol,
 			Price:    newEventPrice,
-			Quantity: 0.004,
+			Quantity: 0.0045,
 		}
 	} else if difference < 99.85 {
 		order = &Order{
 			Symbol:   newEvent.Symbol,
 			Price:    newEventPrice,
-			Quantity: 0.003,
+			Quantity: 0.0035,
 		}
 	}
 
@@ -324,7 +325,7 @@ func (o *Bot) Trade() {
 
 					o.rwm.Lock()
 					o.lastTimeTrade = 0
-					o.lastTradePrice = order.Price + profit
+					o.lastTradePrice = order.Price
 					o.rwm.Unlock()
 
 					log.Printf("order %v canceled after timeout", order)
@@ -488,7 +489,7 @@ func (o *Bot) CheckLimitOrder() {
 						o.lastTradePrice = newlastTradePrice - profit
 					}
 
-					o.lastTimeTrade = time.Now().Unix()
+					//o.lastTimeTrade = time.Now().Unix()
 					o.rwm.Unlock()
 
 					log.Printf("exite order execute price: %v, quantity: %v profit %v",
@@ -661,7 +662,7 @@ func (o *Bot) GetProfitStatictics() func(http.ResponseWriter, *http.Request) {
 		}
 
 		sort.SliceStable(trades, func(i, j int) bool {
-			return trades[i].ExiteOrder.UpdateTime < trades[j].ExiteOrder.UpdateTime
+			return trades[i].ExiteOrder.UpdateTime > trades[j].ExiteOrder.UpdateTime
 		})
 
 		totalProfit := float64(0)
@@ -673,11 +674,11 @@ func (o *Bot) GetProfitStatictics() func(http.ResponseWriter, *http.Request) {
 
 		currentDay := ""
 
-		res := fmt.Sprintf("Day %v \n", previousDay)
+		buf := new(bytes.Buffer)
 
-		_, err = resWriter.Write([]byte(res))
+		_, err = buf.WriteString(fmt.Sprintf("\nDay %v \n", previousDay))
 		if err != nil {
-			log.Printf("GetProfitStatictics() resWriter.Write(firstDay) err: %v\n", err)
+			log.Printf("GetProfitStatictics() buf.WriteString(previousDay) err: %v\n", err)
 		}
 
 		for i, trade := range trades {
@@ -686,18 +687,14 @@ func (o *Bot) GetProfitStatictics() func(http.ResponseWriter, *http.Request) {
 			currentDay = tm.Format("02-01-06")
 
 			if currentDay != previousDay {
-				res = fmt.Sprintf("Day profit: %.2f\n\n", dayProfit)
-
-				_, err = resWriter.Write([]byte(res))
+				_, err = buf.WriteString(fmt.Sprintf("Day profit: %.2f\n\n", dayProfit))
 				if err != nil {
-					log.Printf("GetProfitStatictics() resWriter.Write(totalProfit) err: %v\n", err)
+					log.Printf("GetProfitStatictics() buf.WriteString(dayProfit) err: %v\n", err)
 				}
 
-				res = fmt.Sprintf("Day %v \n", currentDay)
-
-				_, err = resWriter.Write([]byte(res))
+				_, err = buf.WriteString(fmt.Sprintf("Day %v \n", currentDay))
 				if err != nil {
-					log.Printf("GetProfitStatictics() resWriter.Write(currentDay) err: %v\n", err)
+					log.Printf("GetProfitStatictics() buf.WriteString(currentDay) err: %v\n", err)
 				}
 
 				previousDay = currentDay
@@ -708,33 +705,29 @@ func (o *Bot) GetProfitStatictics() func(http.ResponseWriter, *http.Request) {
 			totalProfit += trade.Profit
 			dayProfit += trade.Profit
 
-			res = fmt.Sprintf("%v quantity:%s profit: %.2f\n", tm.Format("02-01-06 15:04"), trade.ExiteOrder.ExecutedQuantity[:6], trade.Profit)
+			trade := fmt.Sprintf("%v quantity:%s profit: %.2f\n", tm.Format("02-01-06 15:04"), trade.ExiteOrder.ExecutedQuantity[:6], trade.Profit)
 
-			_, err = resWriter.Write([]byte(res))
+			_, err = buf.WriteString(trade)
 			if err != nil {
-				log.Printf("GetProfitStatictics() resWriter.Write(trade) err: %v\n", err)
+				log.Printf("GetProfitStatictics() buf.WriteString(trade) err: %v\n", err)
 			}
 
 			if i == len(trades)-1 {
-				res = fmt.Sprintf("Day profit: %.2f\n", dayProfit)
-
-				_, err = resWriter.Write([]byte(res))
+				_, err = buf.WriteString(fmt.Sprintf("Day profit: %.2f\n", dayProfit))
 				if err != nil {
-					log.Printf("GetProfitStatictics() resWriter.Write(dayProfit) err: %v\n", err)
+					log.Printf("GetProfitStatictics() buf.WriteString(dayProfit) err: %v\n", err)
 				}
 			}
 		}
 
-		_, err = resWriter.Write([]byte("\n"))
+		_, err = resWriter.Write([]byte(fmt.Sprintf("Total profit: %.2f\n", totalProfit)))
 		if err != nil {
 			log.Printf("GetProfitStatictics() resWriter.Write(totalProfit) err: %v\n", err)
 		}
 
-		res = fmt.Sprintf("Total profit: %.2f\n", totalProfit)
-
-		_, err = resWriter.Write([]byte(res))
+		_, err = resWriter.Write(buf.Bytes())
 		if err != nil {
-			log.Printf("GetProfitStatictics() resWriter.Write(totalProfit) err: %v\n", err)
+			log.Printf("GetProfitStatictics() resWriter.Write(buf.Bytes()) err: %v\n", err)
 		}
 	}
 }
@@ -761,7 +754,7 @@ func (o *Bot) retryCreateOrder(order *Order) (*binance.CreateOrderResponse, *Ord
 			continue
 		}
 
-		if price-order.Price > 10 {
+		if price-order.Price > 30 {
 			log.Printf("newPrice: %v > oldPrice: %v\n", price, order.Price)
 
 			continue
