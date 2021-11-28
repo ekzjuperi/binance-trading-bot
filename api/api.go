@@ -28,7 +28,7 @@ func (o *API) Start() error {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/info", o.bot.GetAccountInfo())
-	mux.HandleFunc("/orders", o.bot.ListOpenOrders())
+	mux.HandleFunc("/orders", o.bot.GetListOpenOrders())
 	mux.HandleFunc("/profit", o.bot.GetProfitStatictics())
 	mux.HandleFunc("/set-stop-price", o.bot.SetStopPrice())
 

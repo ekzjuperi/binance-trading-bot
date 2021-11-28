@@ -567,7 +567,7 @@ func (o *Bot) GetAccountInfo() func(http.ResponseWriter, *http.Request) {
 	}
 }
 
-func (o *Bot) ListOpenOrders() func(http.ResponseWriter, *http.Request) {
+func (o *Bot) GetListOpenOrders() func(http.ResponseWriter, *http.Request) {
 	return func(resWriter http.ResponseWriter, req *http.Request) {
 		openOrders, err := o.client.NewListOpenOrdersService().Symbol("").
 			Do(context.Background())
