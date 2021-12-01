@@ -27,7 +27,7 @@ const (
 	timeOutForTimer                  = 180
 	pauseAfterTrade                  = 180
 	Quantity                         = 0.01
-	timeUntilLastTradePriceWillReset = 2500 //  time after the last trade price is reset
+	timeUntilLastTradePriceWillReset = 3600 //  time after the last trade price is reset
 )
 
 type Bot struct {
@@ -425,7 +425,7 @@ func (o *Bot) CheckLimitOrder() {
 
 	go func() {
 		for {
-			time.Sleep(time.Second * 10)
+			time.Sleep(time.Second * 15)
 
 			ordersAwaitingCompletion := o.cache.Cache.Items()
 
@@ -439,7 +439,17 @@ func (o *Bot) CheckLimitOrder() {
 				continue
 			}
 
+			openOrders, err := o.client.NewListOpenOrdersService().Symbol(o.Symbol).Do(context.Background())
+			if err != nil {
+				log.Println(err)
+				continue
+			}
+
 			listBinanceOrders := map[string]*binance.Order{}
+
+			for _, openOrder := range openOrders {
+				listBinanceOrders[fmt.Sprintf("%v", openOrder.OrderID)] = openOrder
+			}
 
 			for _, order := range orders {
 				listBinanceOrders[fmt.Sprintf("%v", order.OrderID)] = order
@@ -464,7 +474,7 @@ func (o *Bot) CheckLimitOrder() {
 
 				binanceOrder, ok := listBinanceOrders[fmt.Sprintf("%v", fullTrade.ExiteOrder.OrderID)]
 				if !ok {
-					log.Printf("listBinanceOrders didn't have awaitingOrder:%v", fullTrade.ExiteOrder.OrderID)
+					log.Printf("CheckLimitOrder() didn't have awaitingOrder:%v", fullTrade.ExiteOrder.OrderID)
 					continue
 				}
 
@@ -569,7 +579,7 @@ func (o *Bot) GetAccountInfo() func(http.ResponseWriter, *http.Request) {
 
 func (o *Bot) GetListOpenOrders() func(http.ResponseWriter, *http.Request) {
 	return func(resWriter http.ResponseWriter, req *http.Request) {
-		openOrders, err := o.client.NewListOpenOrdersService().Symbol("").
+		openOrders, err := o.client.NewListOpenOrdersService().Symbol(o.Symbol).
 			Do(context.Background())
 		if err != nil {
 			log.Printf("o.client.NewListOpenOrdersService() err: %v\n", err)
