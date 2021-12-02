@@ -189,7 +189,6 @@ func (o *Bot) MakeDecision(oldEvent *binance.WsAggTradeEvent) {
 	oldEventPrice, _ := strconv.ParseFloat(oldEvent.Price, 32)
 
 	difference := newEventPrice / oldEventPrice * 100
-	log.Println("newEventPrice = ", newEventPrice)
 
 	var order *Order
 	if difference < 99.61 {
@@ -225,6 +224,8 @@ func (o *Bot) MakeDecision(oldEvent *binance.WsAggTradeEvent) {
 	}
 
 	o.orderChan <- order
+
+	log.Println("price difference = ", difference)
 }
 
 func (o *Bot) Trade() {
@@ -241,10 +242,11 @@ func (o *Bot) Trade() {
 			continue
 		}
 
-		// if enough time has passed since the last trade, reset the price of the last trade.
-		if timeFromLastTrade > timeUntilLastTradePriceWillReset {
+		// if enough time has passed since the last trade, reset lastTradePrice and lastTimeTrade.
+		if o.lastTimeTrade != 0 && timeFromLastTrade > timeUntilLastTradePriceWillReset {
 			o.rwm.Lock()
 			o.lastTradePrice = 0
+			o.lastTimeTrade = 0
 			o.rwm.Unlock()
 		}
 
