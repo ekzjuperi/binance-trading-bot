@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	b "github.com/ekzjuperi/binance-trading-bot/internal/bot"
+	"github.com/ekzjuperi/binance-trading-bot/internal/handlers"
 )
 
 type API struct {
@@ -31,6 +32,7 @@ func (o *API) Start() error {
 	mux.HandleFunc("/orders", o.bot.GetListOpenOrders())
 	mux.HandleFunc("/profit", o.bot.GetProfitStatictics())
 	mux.HandleFunc("/set-stop-price", o.bot.SetStopPrice())
+	mux.HandleFunc("/get-logs", handlers.GetLogs())
 
 	return http.ListenAndServe(fmt.Sprintf(":%v", o.port), mux)
 }

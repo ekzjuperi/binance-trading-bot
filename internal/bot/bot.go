@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"sort"
@@ -23,23 +24,30 @@ import (
 
 const (
 	sizeChan                         = 100
-	profit                           = 360
+	profit                           = 590
 	timeOutForTimer                  = 180
 	pauseAfterTrade                  = 180
 	Quantity                         = 0.01
-	timeUntilLastTradePriceWillReset = 3600 //  time after the last trade price is reset
+	timeUntilLastTradePriceWillReset = 3600 // time after the last trade price is reset
+	stopSumOfOpenOrdersForLastDay    = 1500
+
+	millisecondInDay                       = int64(1000 * 24 * 60 * 60)
+	timeOutInMinForGetStopPrice            = 5
+	timeOutForGetSumOfOpenOrdersForLastDay = 5
+	timeOutInSecForCheckLimitOrders        = 15
 )
 
 type Bot struct {
-	cache          *cache.Cache
-	client         *binance.Client
-	analysisСhan   chan *binance.WsAggTradeEvent
-	orderChan      chan *Order
-	fullTradeChan  chan *FullTrade
-	Symbol         string // trading pair
-	lastTimeTrade  int64  // unix time from last trade
-	stopPrice      float64
-	lastTradePrice float64
+	cache                     *cache.Cache
+	client                    *binance.Client
+	analysisСhan              chan *binance.WsAggTradeEvent
+	orderChan                 chan *Order
+	fullTradeChan             chan *FullTrade
+	Symbol                    string // trading pair
+	lastTimeTrade             int64  // unix time from last trade
+	stopPrice                 float64
+	lastTradePrice            float64
+	sumOfOpenOrdersForLastDay float64
 
 	wg  *sync.WaitGroup
 	rwm *sync.RWMutex
@@ -78,17 +86,19 @@ func NewBot(client *binance.Client, cfg *configs.BotConfig) *Bot {
 func (o *Bot) Start() {
 	go o.getStopPrice()
 
-	o.wg.Add(1)
-
-	go o.Analyze()
+	go o.getSumOfOpenTradesForLastDay()
 
 	o.wg.Add(1)
 
-	go o.Trade()
+	go o.analyze()
 
 	o.wg.Add(1)
 
-	go o.CheckLimitOrder()
+	go o.trade()
+
+	o.wg.Add(1)
+
+	go o.checkLimitOrders()
 
 	o.wg.Wait()
 
@@ -113,8 +123,8 @@ func (o *Bot) StartPricesStream() (chan struct{}, error) {
 	return doneC, nil
 }
 
-// Analyze func analyzes prices from the exchange stream.
-func (o *Bot) Analyze() {
+// analyze func analyzes prices from the exchange stream.
+func (o *Bot) analyze() {
 	defer o.wg.Done()
 
 	doneC, err := o.StartPricesStream()
@@ -131,8 +141,8 @@ func (o *Bot) Analyze() {
 	oldEvent5 := <-o.analysisСhan
 
 	price, _ := strconv.ParseFloat(oldEvent.Price, 32)
-
 	o.lastTradePrice = price
+	o.lastTimeTrade = time.Now().Unix()
 
 	timer := time.NewTimer(time.Second * 120)
 	timer2 := time.NewTimer(time.Second * 90)
@@ -145,23 +155,23 @@ func (o *Bot) Analyze() {
 	for {
 		select {
 		case <-timer.C:
-			o.MakeDecision(oldEvent)
+			o.makeDecision(oldEvent)
 			timer.Reset(time.Second * timeOutForTimer)
 
 		case <-timer2.C:
-			o.MakeDecision(oldEvent2)
+			o.makeDecision(oldEvent2)
 			timer2.Reset(time.Second * timeOutForTimer)
 
 		case <-timer3.C:
-			o.MakeDecision(oldEvent3)
+			o.makeDecision(oldEvent3)
 			timer3.Reset(time.Second * timeOutForTimer)
 
 		case <-timer4.C:
-			o.MakeDecision(oldEvent4)
+			o.makeDecision(oldEvent4)
 			timer4.Reset(time.Second * timeOutForTimer)
 
 		case <-timer5.C:
-			o.MakeDecision(oldEvent5)
+			o.makeDecision(oldEvent5)
 			timer5.Reset(time.Second * timeOutForTimer)
 
 		default:
@@ -172,7 +182,7 @@ func (o *Bot) Analyze() {
 
 				o.wg.Add(1)
 
-				go o.Analyze()
+				go o.analyze()
 
 				return
 
@@ -183,7 +193,7 @@ func (o *Bot) Analyze() {
 	}
 }
 
-func (o *Bot) MakeDecision(oldEvent *binance.WsAggTradeEvent) {
+func (o *Bot) makeDecision(oldEvent *binance.WsAggTradeEvent) {
 	newEvent := <-o.analysisСhan
 	newEventPrice, _ := strconv.ParseFloat(newEvent.Price, 32)
 	oldEventPrice, _ := strconv.ParseFloat(oldEvent.Price, 32)
@@ -217,8 +227,44 @@ func (o *Bot) MakeDecision(oldEvent *binance.WsAggTradeEvent) {
 		return
 	}
 
+	timeFromLastTrade := (time.Now().Unix() - o.lastTimeTrade)
+
+	// if enough time has passed since the last trade, reset lastTradePrice and lastTimeTrade.
+	if o.lastTimeTrade != 0 && timeFromLastTrade > timeUntilLastTradePriceWillReset {
+		o.rwm.Lock()
+		o.lastTradePrice = 0
+		o.lastTimeTrade = 0
+		o.rwm.Unlock()
+	}
+
+	// if order price >= stop price, skip trade.
 	if newEventPrice >= o.stopPrice {
 		log.Printf("order %v skip, price(%v) > o.stopPrice(%v)\n", order, order.Price, o.stopPrice)
+
+		return
+	}
+
+	// if not enough time has passed since the last trade, skip trade.
+	if timeFromLastTrade < pauseAfterTrade {
+		log.Printf("order: %v skip, %v s. has passed since the last trade s\n", order, timeFromLastTrade)
+
+		return
+	}
+
+	// if last trade price >= new price, skip trade.
+	if (o.lastTradePrice != 0) && order.Price >= o.lastTradePrice {
+		log.Printf("order: %v skip, order.Price(%v) >= o.lastTradePrice(%v)\n", order, order.Price, o.lastTradePrice)
+
+		return
+	}
+
+	// if sumOfOpenOrdersForLastDay > stopSumOfOpenOrdersForLastDay skip trade.
+	if o.sumOfOpenOrdersForLastDay > stopSumOfOpenOrdersForLastDay {
+		log.Printf("order: %v skip, the worth of open trades: %v > day limit: %v\n",
+			order,
+			o.sumOfOpenOrdersForLastDay,
+			stopSumOfOpenOrdersForLastDay,
+		)
 
 		return
 	}
@@ -228,33 +274,12 @@ func (o *Bot) MakeDecision(oldEvent *binance.WsAggTradeEvent) {
 	log.Println("price difference = ", difference)
 }
 
-func (o *Bot) Trade() {
+func (o *Bot) trade() {
 	defer o.wg.Done()
 
 	// get order from orderChan.
 	for order := range o.orderChan {
 		log.Printf("order: %v\n", order)
-
-		// if not enough time has passed since the last trade, skip new trade.
-		timeFromLastTrade := (time.Now().Unix() - o.lastTimeTrade)
-		if timeFromLastTrade < pauseAfterTrade {
-			log.Printf("order: %v skip, %v s. has passed since the last trade s\n", order, timeFromLastTrade)
-			continue
-		}
-
-		// if enough time has passed since the last trade, reset lastTradePrice and lastTimeTrade.
-		if o.lastTimeTrade != 0 && timeFromLastTrade > timeUntilLastTradePriceWillReset {
-			o.rwm.Lock()
-			o.lastTradePrice = 0
-			o.lastTimeTrade = 0
-			o.rwm.Unlock()
-		}
-
-		// if last trade price >= new price, skip new trade.
-		if (o.lastTradePrice != 0) && order.Price >= o.lastTradePrice {
-			log.Printf("order: %v skip, order.Price(%v) >= o.lastTradePrice(%v)\n", order, order.Price, o.lastTradePrice)
-			continue
-		}
 
 		// get the highest price bid in the order book.
 		depth, err := o.client.NewDepthService().Symbol(order.Symbol).
@@ -273,7 +298,7 @@ func (o *Bot) Trade() {
 		order.Price = price
 
 		// create order
-		firstOrderResolve, err := o.CreateOrder(order, binance.SideTypeBuy, binance.OrderTypeLimitMaker, binance.TimeInForceTypeGTC)
+		firstOrderResolve, err := o.createOrder(order, binance.SideTypeBuy, binance.OrderTypeLimitMaker, binance.TimeInForceTypeGTC)
 		if err != nil && err.Error() == "<APIError> code=-2010, msg=Account has insufficient balance for requested action." {
 			log.Printf("Account has insufficient balance for buy %v\n", order)
 
@@ -297,83 +322,89 @@ func (o *Bot) Trade() {
 		o.lastTradePrice = order.Price - (profit / 2)
 		o.rwm.Unlock()
 
-		go func(firstOrderResolve *binance.CreateOrderResponse, order *Order) {
-			timeNow := time.Now().Unix()
-
-			var entryBinanceOrder *binance.Order
-
-			for {
-				orderTimeout := (time.Now().Unix() - timeNow)
-
-				entryBinanceOrder, err = o.client.NewGetOrderService().Symbol(firstOrderResolve.Symbol).
-					OrderID(firstOrderResolve.OrderID).Do(context.Background())
-				if err != nil {
-					log.Println(err)
-					continue
-				}
-
-				if entryBinanceOrder.Status == binance.OrderStatusTypeFilled {
-					log.Printf("entry order execute price: %v, quantity: %v", entryBinanceOrder.Price, entryBinanceOrder.ExecutedQuantity)
-					break
-				}
-
-				if orderTimeout > 100 && entryBinanceOrder.Status == binance.OrderStatusTypeNew {
-					_, err := o.client.NewCancelOrderService().Symbol(firstOrderResolve.Symbol).
-						OrderID(firstOrderResolve.OrderID).Do(context.Background())
-					if err != nil {
-						log.Println(err)
-						continue
-					}
-
-					o.rwm.Lock()
-					o.lastTimeTrade = 0
-					o.lastTradePrice = order.Price
-					o.rwm.Unlock()
-
-					log.Printf("order %v canceled after timeout", order)
-
-					return
-				}
-
-				time.Sleep(time.Second * 3)
-			}
-
-			log.Printf("Order %v executed\n", order)
-
-			order.Price += profit
-
-			for {
-				secondOrderResolve, err := o.CreateOrder(order, binance.SideTypeSell, binance.OrderTypeLimit, binance.TimeInForceTypeGTC)
-				if err != nil {
-					log.Printf("An error occurred during order execution, order: %v, type: %v, err: %v\n", order, binance.OrderTypeLimit, err)
-					continue
-				}
-
-				log.Printf("Order limit create %v\n", secondOrderResolve)
-
-				exitBinanceOrder, err := o.client.NewGetOrderService().Symbol(secondOrderResolve.Symbol).
-					OrderID(secondOrderResolve.OrderID).Do(context.Background())
-				if err != nil {
-					log.Println(err)
-					continue
-				}
-
-				cTrade := &FullTrade{
-					EnterOrder: entryBinanceOrder,
-					ExiteOrder: exitBinanceOrder,
-				}
-
-				o.fullTradeChan <- cTrade
-
-				break
-			}
-
-			o.lastTimeTrade = time.Now().Unix()
-		}(firstOrderResolve, order)
+		go o.checkEntryOrder(firstOrderResolve, order)
 	}
 }
 
-func (o *Bot) CreateOrder(
+func (o *Bot) checkEntryOrder(firstOrderResolve *binance.CreateOrderResponse, order *Order) {
+	timeNow := time.Now().Unix()
+
+	var entryBinanceOrder *binance.Order
+
+	var err error
+
+	for {
+		orderTimeout := (time.Now().Unix() - timeNow)
+
+		entryBinanceOrder, err = o.client.NewGetOrderService().Symbol(firstOrderResolve.Symbol).
+			OrderID(firstOrderResolve.OrderID).Do(context.Background())
+		if err != nil {
+			log.Println(err)
+			continue
+		}
+
+		if entryBinanceOrder.Status == binance.OrderStatusTypeFilled {
+			log.Printf("entry order execute price: %v, quantity: %v", entryBinanceOrder.Price, entryBinanceOrder.ExecutedQuantity)
+			break
+		}
+
+		if orderTimeout > 100 && entryBinanceOrder.Status == binance.OrderStatusTypeNew {
+			_, err := o.client.NewCancelOrderService().Symbol(firstOrderResolve.Symbol).
+				OrderID(firstOrderResolve.OrderID).Do(context.Background())
+			if err != nil {
+				log.Println(err)
+				continue
+			}
+
+			o.rwm.Lock()
+			o.lastTimeTrade = 0
+			o.lastTradePrice = order.Price
+			o.rwm.Unlock()
+
+			log.Printf("order %v canceled after timeout", order)
+
+			return
+		}
+
+		time.Sleep(time.Second * 3)
+	}
+
+	log.Printf("Order %v executed\n", order)
+
+	order.Price += profit
+
+	for {
+		secondOrderResolve, err := o.createOrder(order, binance.SideTypeSell, binance.OrderTypeLimit, binance.TimeInForceTypeGTC)
+		if err != nil {
+			log.Printf("An error occurred during order execution, order: %v, type: %v, err: %v\n", order, binance.OrderTypeLimit, err)
+			continue
+		}
+
+		log.Printf("Order limit create %v\n", secondOrderResolve)
+
+		exitBinanceOrder, err := o.client.NewGetOrderService().Symbol(secondOrderResolve.Symbol).
+			OrderID(secondOrderResolve.OrderID).Do(context.Background())
+		if err != nil {
+			log.Println(err)
+			continue
+		}
+
+		cTrade := &FullTrade{
+			EnterOrder: entryBinanceOrder,
+			ExiteOrder: exitBinanceOrder,
+		}
+
+		o.fullTradeChan <- cTrade
+
+		break
+	}
+
+	o.rwm.Lock()
+	o.lastTimeTrade = time.Now().Unix()
+	o.rwm.Unlock()
+}
+
+func (o *Bot) createOrder(
 	order *Order,
 	side binance.SideType,
 	typeOrder binance.OrderType,
@@ -422,12 +453,12 @@ func (o *Bot) CreateOrder(
 	return orderResponse, err
 }
 
-func (o *Bot) CheckLimitOrder() {
+func (o *Bot) checkLimitOrders() {
 	defer o.wg.Done()
 
 	go func() {
 		for {
-			time.Sleep(time.Second * 15)
+			time.Sleep(time.Second * timeOutInSecForCheckLimitOrders)
 
 			ordersAwaitingCompletion := o.cache.Cache.Items()
 
@@ -499,9 +530,8 @@ func (o *Bot) CheckLimitOrder() {
 
 					if o.lastTradePrice == 0 {
 						o.lastTradePrice = newlastTradePrice - profit
+						o.lastTimeTrade = time.Now().Unix() - pauseAfterTrade
 					}
-
-					//o.lastTimeTrade = time.Now().Unix()
 					o.rwm.Unlock()
 
 					log.Printf("exite order execute price: %v, quantity: %v profit %v",
@@ -596,31 +626,6 @@ func (o *Bot) GetListOpenOrders() func(http.ResponseWriter, *http.Request) {
 		}
 
 		_, err = resWriter.Write(bb)
-		if err != nil {
-			log.Printf("resWriter.Write() err: %v\n", err)
-		}
-	}
-}
-
-func (o *Bot) SetStopPrice() func(http.ResponseWriter, *http.Request) {
-	return func(resWriter http.ResponseWriter, req *http.Request) {
-		query := req.URL.Query()
-		price := query["price"][0]
-
-		if price == "" {
-			_, err := resWriter.Write([]byte(fmt.Sprintf("incorrect stop price = %v", price)))
-			if err != nil {
-				log.Printf("resWriter.Write() err: %v\n", err)
-			}
-
-			return
-		}
-
-		stopPriceFloat, _ := strconv.ParseFloat(price, 32)
-
-		o.stopPrice = stopPriceFloat
-
-		_, err := resWriter.Write([]byte(fmt.Sprintf("stop price now %v", stopPriceFloat)))
 		if err != nil {
 			log.Printf("resWriter.Write() err: %v\n", err)
 		}
@@ -766,7 +771,7 @@ func (o *Bot) retryCreateOrder(order *Order) (*binance.CreateOrderResponse, *Ord
 			continue
 		}
 
-		if price-order.Price > 30 {
+		if price-order.Price > 50 {
 			log.Printf("newPrice: %v > oldPrice: %v\n", price, order.Price)
 
 			continue
@@ -774,7 +779,7 @@ func (o *Bot) retryCreateOrder(order *Order) (*binance.CreateOrderResponse, *Ord
 
 		order.Price = price
 
-		firstOrderResolve, err := o.CreateOrder(order, binance.SideTypeBuy, binance.OrderTypeLimitMaker, binance.TimeInForceTypeGTC)
+		firstOrderResolve, err := o.createOrder(order, binance.SideTypeBuy, binance.OrderTypeLimitMaker, binance.TimeInForceTypeGTC)
 		if err != nil {
 			log.Printf("An error occurred during order execution, order: %v, err: %v\n", order, err)
 
@@ -789,12 +794,12 @@ func (o *Bot) retryCreateOrder(order *Order) (*binance.CreateOrderResponse, *Ord
 
 func (o *Bot) getStopPrice() {
 	for {
-		last24Hours := time.Now().UnixNano()/(int64(time.Millisecond)/int64(time.Nanosecond)) - int64(1000*24*60*60)
+		last24Hours := time.Now().UnixNano()/(int64(time.Millisecond)/int64(time.Nanosecond)) - millisecondInDay
 
 		klines, err := o.client.NewKlinesService().Symbol(o.Symbol).StartTime(last24Hours).Interval("15m").Do(context.Background())
 		if err != nil {
 			log.Printf("o.client.NewKlinesService(%v) err: %v\n", o.Symbol, err)
-			return
+			continue
 		}
 
 		minPrice := float64(0)
@@ -804,13 +809,13 @@ func (o *Bot) getStopPrice() {
 			priceHigh, err := strconv.ParseFloat(kline.High, 32)
 			if err != nil {
 				log.Printf("getStopPrice() strconv.ParseFloat(%v, 32)) err: %v\n", kline.High, err)
-				return
+				continue
 			}
 
 			priceLow, err := strconv.ParseFloat(kline.Low, 32)
 			if err != nil {
 				log.Printf("getStopPrice() strconv.ParseFloat(%v, 32)) err: %v\n", kline.Low, err)
-				return
+				continue
 			}
 
 			if minPrice == 0 && priceLow != 0 {
@@ -832,8 +837,81 @@ func (o *Bot) getStopPrice() {
 		o.stopPrice = stopPrice
 		o.rwm.Unlock()
 
-		log.Printf("new stop price: %v\n", stopPrice)
+		time.Sleep(time.Minute * timeOutInMinForGetStopPrice)
+	}
+}
 
-		time.Sleep(time.Minute * 5)
+func (o *Bot) getSumOfOpenTradesForLastDay() {
+	for {
+		last24Hours := time.Now().UnixNano()/(int64(time.Millisecond)/int64(time.Nanosecond)) - millisecondInDay
+
+		ordersAwaitingCompletion := o.cache.Cache.Items()
+
+		if len(ordersAwaitingCompletion) == 0 {
+			continue
+		}
+
+		sumOfOpenTradesForLastDay := float64(0)
+
+		for _, order := range ordersAwaitingCompletion {
+			b, err := json.Marshal(order.Object)
+			if err != nil {
+				log.Printf("json.Marshal(order.Object) err: %v\n", err)
+				continue
+			}
+
+			var fullTrade FullTrade
+
+			err = json.Unmarshal(b, &fullTrade)
+			if err != nil {
+				log.Printf("json.Unmarshal(b, FullTrade) err: %v\n", err)
+				continue
+			}
+
+			if fullTrade.EnterOrder.Time < last24Hours {
+				continue
+			}
+
+			if fullTrade.ExiteOrder.Status == binance.OrderStatusTypeFilled {
+				continue
+			}
+
+			cummulativeQuoteQuantity, _ := strconv.ParseFloat(fullTrade.EnterOrder.CummulativeQuoteQuantity, 32)
+
+			sumOfOpenTradesForLastDay += cummulativeQuoteQuantity
+		}
+
+		o.rwm.Lock()
+		o.sumOfOpenOrdersForLastDay = math.Round((sumOfOpenTradesForLastDay)*100) / 100
+		o.rwm.Unlock()
+
+		//log.Printf("Open trades for the last day in the amount of $%v\n", o.sumOfOpenOrdersForLastDay)
+
+		time.Sleep(time.Minute * timeOutForGetSumOfOpenOrdersForLastDay)
+	}
+}
+
+func (o *Bot) SetStopPrice() func(http.ResponseWriter, *http.Request) {
+	return func(resWriter http.ResponseWriter, req *http.Request) {
+		query := req.URL.Query()
+		price := query["price"][0]
+
+		if price == "" {
+			_, err := resWriter.Write([]byte(fmt.Sprintf("incorrect stop price = %v", price)))
+			if err != nil {
+				log.Printf("resWriter.Write() err: %v\n", err)
+			}
+
+			return
+		}
+
+		stopPriceFloat, _ := strconv.ParseFloat(price, 32)
+
+		o.stopPrice = stopPriceFloat
+
+		_, err := resWriter.Write([]byte(fmt.Sprintf("stop price now %v", stopPriceFloat)))
+		if err != nil {
+			log.Printf("resWriter.Write() err: %v\n", err)
+		}
 	}
 }
