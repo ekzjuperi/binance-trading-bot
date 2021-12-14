@@ -40,7 +40,7 @@ const (
 type Bot struct {
 	cache                     *cache.Cache
 	client                    *binance.Client
-	analysisСhan              chan *binance.WsAggTradeEvent
+	analysisChan              chan *binance.WsAggTradeEvent
 	orderChan                 chan *Order
 	fullTradeChan             chan *FullTrade
 	Symbol                    string // trading pair
@@ -71,7 +71,7 @@ func NewBot(client *binance.Client, cfg *configs.BotConfig) *Bot {
 
 	bot.cache = cache.NewCache()
 	bot.client = client
-	bot.analysisСhan = make(chan *binance.WsAggTradeEvent, sizeChan)
+	bot.analysisChan = make(chan *binance.WsAggTradeEvent, sizeChan)
 	bot.orderChan = make(chan *Order, sizeChan)
 	bot.fullTradeChan = make(chan *FullTrade, sizeChan)
 	bot.Symbol = cfg.Symbol
@@ -108,7 +108,7 @@ func (o *Bot) Start() {
 // StartPricesStream func stream prices from binance.
 func (o *Bot) StartPricesStream() (chan struct{}, error) {
 	wsAggTradeHandler := func(event *binance.WsAggTradeEvent) {
-		o.analysisСhan <- event
+		o.analysisChan <- event
 	}
 	errHandler := func(err error) {
 		log.Println(err)
@@ -134,11 +134,11 @@ func (o *Bot) analyze() {
 		return
 	}
 
-	oldEvent := <-o.analysisСhan
-	oldEvent2 := <-o.analysisСhan
-	oldEvent3 := <-o.analysisСhan
-	oldEvent4 := <-o.analysisСhan
-	oldEvent5 := <-o.analysisСhan
+	oldEvent := <-o.analysisChan
+	oldEvent2 := <-o.analysisChan
+	oldEvent3 := <-o.analysisChan
+	oldEvent4 := <-o.analysisChan
+	oldEvent5 := <-o.analysisChan
 
 	price, _ := strconv.ParseFloat(oldEvent.Price, 32)
 	o.lastTradePrice = price
@@ -186,7 +186,7 @@ func (o *Bot) analyze() {
 
 				return
 
-			case <-o.analysisСhan:
+			case <-o.analysisChan:
 				continue
 			}
 		}
@@ -194,7 +194,7 @@ func (o *Bot) analyze() {
 }
 
 func (o *Bot) makeDecision(oldEvent *binance.WsAggTradeEvent) {
-	newEvent := <-o.analysisСhan
+	newEvent := <-o.analysisChan
 	newEventPrice, _ := strconv.ParseFloat(newEvent.Price, 32)
 	oldEventPrice, _ := strconv.ParseFloat(oldEvent.Price, 32)
 
@@ -244,20 +244,6 @@ func (o *Bot) makeDecision(oldEvent *binance.WsAggTradeEvent) {
 		return
 	}
 
-	// if not enough time has passed since the last trade, skip trade.
-	if timeFromLastTrade < pauseAfterTrade {
-		log.Printf("order: %v skip, %v s. has passed since the last trade s\n", order, timeFromLastTrade)
-
-		return
-	}
-
-	// if last trade price >= new price, skip trade.
-	if (o.lastTradePrice != 0) && order.Price >= o.lastTradePrice {
-		log.Printf("order: %v skip, order.Price(%v) >= o.lastTradePrice(%v)\n", order, order.Price, o.lastTradePrice)
-
-		return
-	}
-
 	// if sumOfOpenOrdersForLastDay > stopSumOfOpenOrdersForLastDay skip trade.
 	if o.sumOfOpenOrdersForLastDay > stopSumOfOpenOrdersForLastDay {
 		log.Printf("order: %v skip, the worth of open trades: %v > day limit: %v\n",
@@ -279,6 +265,22 @@ func (o *Bot) trade() {
 
 	// get order from orderChan.
 	for order := range o.orderChan {
+		timeFromLastTrade := (time.Now().Unix() - o.lastTimeTrade)
+
+		// if not enough time has passed since the last trade, skip trade.
+		if timeFromLastTrade < pauseAfterTrade {
+			log.Printf("order: %v skip, %v s. has passed since the last trade s\n", order, timeFromLastTrade)
+
+			return
+		}
+
+		// if last trade price >= new price, skip trade.
+		if (o.lastTradePrice != 0) && order.Price >= o.lastTradePrice {
+			log.Printf("order: %v skip, order.Price(%v) >= o.lastTradePrice(%v)\n", order, order.Price, o.lastTradePrice)
+
+			return
+		}
+
 		log.Printf("order: %v\n", order)
 
 		// get the highest price bid in the order book.
