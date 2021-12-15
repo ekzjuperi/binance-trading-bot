@@ -28,11 +28,11 @@ func NewAPI(
 func (o *API) Start() error {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/info", o.bot.GetAccountInfo())
-	mux.HandleFunc("/orders", o.bot.GetListOpenOrders())
-	mux.HandleFunc("/profit", o.bot.GetProfitStatictics())
-	mux.HandleFunc("/set-stop-price", o.bot.SetStopPrice())
+	mux.HandleFunc("/info", handlers.GetAccountInfo(o.bot.Client))
+	mux.HandleFunc("/orders", handlers.GetListOpenOrders(o.bot.Client, o.bot.Symbol))
+	mux.HandleFunc("/profit", handlers.GetProfitStatictics())
 	mux.HandleFunc("/get-logs", handlers.GetLogs())
+	mux.HandleFunc("/set-stop-price", o.bot.SetStopPrice())
 
 	return http.ListenAndServe(fmt.Sprintf(":%v", o.port), mux)
 }
