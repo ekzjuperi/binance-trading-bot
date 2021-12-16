@@ -36,6 +36,12 @@ func (c *Cache) loadCache() {
 		log.Fatalf("ioutil.ReadAll(jsonFile) err: %v\n", err)
 	}
 
+	if len(byteValue) == 0 {
+		c.Cache = gc.New(0, 0)
+
+		return
+	}
+
 	var items map[string]gc.Item
 
 	err = json.Unmarshal(byteValue, &items)
