@@ -21,13 +21,14 @@ import (
 )
 
 const (
+	profitPercent = 0.01
+	tradeAmount   = 400.0
+
 	sizeChan                         = 100
-	profit                           = 590
 	timeOutForTimer                  = 180
 	pauseAfterTrade                  = 180
-	Quantity                         = 0.01
 	timeUntilLastTradePriceWillReset = 3600 // time after the last trade price is reset
-	stopSumOfOpenOrdersForLastDay    = 1650
+	stopSumOfOpenOrdersForLastDay    = 2000
 
 	timeOutToCheckEntryOrder               = 3
 	timeOutInMinForGetStopPrice            = 5
@@ -124,6 +125,7 @@ func (o *Bot) analyze() {
 	}
 
 	oldEvent := <-o.analysisChan
+	fmt.Println(oldEvent)
 	oldEvent2 := <-o.analysisChan
 	oldEvent3 := <-o.analysisChan
 	oldEvent4 := <-o.analysisChan
@@ -190,23 +192,23 @@ func (o *Bot) makeDecision(oldEvent *binance.WsAggTradeEvent) {
 	difference := newEventPrice / oldEventPrice * 100
 
 	var order *models.Order
-	if difference < 99.61 {
+	if difference < 99.55 {
 		order = &models.Order{
 			Symbol:   newEvent.Symbol,
 			Price:    newEventPrice,
-			Quantity: 0.0060,
+			Quantity: 2 * tradeAmount / newEventPrice,
 		}
-	} else if difference < 99.75 {
+	} else if difference < 99.70 {
 		order = &models.Order{
 			Symbol:   newEvent.Symbol,
 			Price:    newEventPrice,
-			Quantity: 0.0050,
+			Quantity: 1.5 * tradeAmount / newEventPrice,
 		}
-	} else if difference < 99.85 {
+	} else if difference < 99.80 {
 		order = &models.Order{
 			Symbol:   newEvent.Symbol,
 			Price:    newEventPrice,
-			Quantity: 0.0040,
+			Quantity: tradeAmount / newEventPrice,
 		}
 	}
 
@@ -243,6 +245,9 @@ func (o *Bot) makeDecision(oldEvent *binance.WsAggTradeEvent) {
 
 		return
 	}
+
+	order.Price = math.Round((order.Price)*100) / 100
+	order.Quantity = math.Round((order.Quantity)*100) / 100
 
 	o.orderChan <- order
 
@@ -310,7 +315,7 @@ func (o *Bot) trade() {
 
 		o.rwm.Lock()
 		o.lastTimeTrade = time.Now().Unix()
-		o.lastTradePrice = order.Price - (profit / 2)
+		o.lastTradePrice = order.Price - (order.Price * profitPercent / 2)
 		o.rwm.Unlock()
 
 		go o.checkEntryOrder(firstOrderResolve, order)
@@ -348,7 +353,7 @@ func (o *Bot) checkEntryOrder(firstOrderResolve *binance.CreateOrderResponse, or
 			}
 
 			o.rwm.Lock()
-			o.lastTimeTrade = 0
+			o.lastTimeTrade = time.Now().Unix() - pauseAfterTrade
 			o.lastTradePrice = order.Price
 			o.rwm.Unlock()
 
@@ -362,7 +367,7 @@ func (o *Bot) checkEntryOrder(firstOrderResolve *binance.CreateOrderResponse, or
 
 	log.Printf("Order %v executed\n", order)
 
-	order.Price += profit
+	order.Price += order.Price * profitPercent
 
 	for {
 		secondOrderResolve, err := o.createOrder(order, binance.SideTypeSell, binance.OrderTypeLimit, binance.TimeInForceTypeGTC)
@@ -389,10 +394,6 @@ func (o *Bot) checkEntryOrder(firstOrderResolve *binance.CreateOrderResponse, or
 
 		break
 	}
-
-	o.rwm.Lock()
-	o.lastTimeTrade = time.Now().Unix()
-	o.rwm.Unlock()
 }
 
 func (o *Bot) createOrder(
@@ -430,7 +431,7 @@ func (o *Bot) createOrder(
 			Do(context.Background())
 
 	case binance.OrderTypeStopLoss:
-		stopLoss := int(order.Price - profit)
+		stopLoss := int(order.Price - order.Price*profitPercent)
 
 		orderResponse, err = o.Client.NewCreateOrderService().Symbol(order.Symbol).
 			Side(side).
@@ -520,7 +521,7 @@ func (o *Bot) checkLimitOrders() {
 					o.cache.SaveCache()
 
 					if o.lastTradePrice == 0 {
-						o.lastTradePrice = newlastTradePrice - profit
+						o.lastTradePrice = newlastTradePrice - newlastTradePrice*profitPercent
 						o.lastTimeTrade = time.Now().Unix() - pauseAfterTrade
 					}
 					o.rwm.Unlock()
