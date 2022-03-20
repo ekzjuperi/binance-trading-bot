@@ -3,11 +3,11 @@ package main
 import (
 	"log"
 
+	"github.com/adshao/go-binance/v2"
+
 	"github.com/ekzjuperi/binance-trading-bot/api"
 	"github.com/ekzjuperi/binance-trading-bot/configs"
 	b "github.com/ekzjuperi/binance-trading-bot/internal/bot"
-
-	"github.com/adshao/go-binance/v2"
 )
 
 func main() {
@@ -16,7 +16,8 @@ func main() {
 		log.Fatalf("configs.GetConfig() err: %v", err)
 	}
 
-	binance.UseTestnet = true
+	binance.UseTestnet = cfg.UseTestNet
+	log.Printf("Use binance test net? %v\n", cfg.UseTestNet)
 
 	client := binance.NewClient(cfg.APIKey, cfg.SecretKey)
 
@@ -27,7 +28,7 @@ func main() {
 	go func() {
 		err := serviceAPI.Start()
 
-		log.Println("api stop work ", err)
+		log.Printf("api stop work %v\n", err)
 	}()
 
 	bot.Start()

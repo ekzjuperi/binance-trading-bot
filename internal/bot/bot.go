@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/adshao/go-binance/v2"
+
 	"github.com/ekzjuperi/binance-trading-bot/configs"
 	"github.com/ekzjuperi/binance-trading-bot/internal/cache"
 	"github.com/ekzjuperi/binance-trading-bot/internal/models"
@@ -21,36 +22,40 @@ import (
 )
 
 const (
-	profitPercent = 0.01
-	tradeAmount   = 300.0
-
-	sizeChan                         = 100
-	timeOutForTimer                  = 180
-	pauseAfterTrade                  = 180
-	timeUntilLastTradePriceWillReset = 7200 // time after the last trade price is reset
-	stopSumOfOpenOrdersForLastDay    = 1800
-	dailyChanneRatioForStopPrice     = 0.70
-
+	timeOutForTimer                        = 180
+	pauseAfterTrade                        = 180
 	timeOutToCheckEntryOrder               = 3
 	timeOutInMinForGetStopPrice            = 5
 	timeOutForGetSumOfOpenOrdersForLastDay = 5
 	timeOutInSecForCheckLimitOrders        = 15
+	sizeChan                               = 100
 
-	millisecondInDay = int64(1000 * 24 * 60 * 60)
-	bitSize32        = 32
+	millisecondInDay  = int64(1000 * 24 * 60 * 60)
+	millisecondInWeek = millisecondInDay * 7
+	bitSize32         = 32
+	interval15Min     = "15m"
+	interval1Hour     = "1h"
 )
 
 type Bot struct {
-	client                    *binance.Client
-	cache                     *cache.Cache
-	analysisChan              chan *binance.WsAggTradeEvent
-	orderChan                 chan *models.Order
-	fullTradeChan             chan *models.FullTrade
-	symbol                    string // trading pair
-	lastTimeTrade             int64  // unix time from last trade
-	stopPrice                 float64
-	lastTradePrice            float64
+	client                           *binance.Client
+	cache                            *cache.Cache
+	analysisChan                     chan *binance.WsAggTradeEvent
+	orderChan                        chan *models.Order
+	fullTradeChan                    chan *models.FullTrade
+	symbol                           string // trading pair
+	profitInPercent                  float64
+	tradeAmount                      float64
+	stopSumOfOpenOrdersForLastDay    float64
+	dailyRatioForStopPrice           float64
+	weeklyRatioForStopPrice          float64
+	timeUntilLastTradePriceWillReset int64
+
 	sumOfOpenOrdersForLastDay float64
+	lastTimeTrade             int64 // unix time from last trade
+	dayStopPrice              float64
+	weekStopPrice             float64
+	lastTradePrice            float64
 
 	wg  *sync.WaitGroup
 	rwm *sync.RWMutex
@@ -58,24 +63,32 @@ type Bot struct {
 
 // NewBot func initializes the bot.
 func NewBot(client *binance.Client, cfg *configs.BotConfig) *Bot {
-	var bot Bot
+	bot := Bot{
+		client:                           client,
+		cache:                            cache.NewCache(),
+		analysisChan:                     make(chan *binance.WsAggTradeEvent, sizeChan),
+		orderChan:                        make(chan *models.Order, sizeChan),
+		fullTradeChan:                    make(chan *models.FullTrade, sizeChan),
+		symbol:                           cfg.Symbol,
+		profitInPercent:                  cfg.ProfitInPercent,
+		tradeAmount:                      cfg.TradeAmount,
+		stopSumOfOpenOrdersForLastDay:    cfg.StopSumOfOpenOrdersForLastDay,
+		dailyRatioForStopPrice:           cfg.DailyRatioForStopPrice,
+		weeklyRatioForStopPrice:          cfg.WeeklyRatioForStopPrice,
+		timeUntilLastTradePriceWillReset: cfg.TimeUntilLastTradePriceWillReset,
 
-	bot.cache = cache.NewCache()
-	bot.client = client
-	bot.analysisChan = make(chan *binance.WsAggTradeEvent, sizeChan)
-	bot.orderChan = make(chan *models.Order, sizeChan)
-	bot.fullTradeChan = make(chan *models.FullTrade, sizeChan)
-	bot.symbol = cfg.Symbol
-
-	bot.wg = &sync.WaitGroup{}
-	bot.rwm = &sync.RWMutex{}
+		wg:  &sync.WaitGroup{},
+		rwm: &sync.RWMutex{},
+	}
 
 	return &bot
 }
 
 // Start func start bot.
 func (o *Bot) Start() {
-	go o.getStopPrice()
+	go o.getStopPrice(&o.dayStopPrice, millisecondInDay, interval15Min, o.dailyRatioForStopPrice)
+
+	go o.getStopPrice(&o.weekStopPrice, millisecondInWeek, interval1Hour, o.weeklyRatioForStopPrice)
 
 	go o.getSumOfOpenTradesForLastDay()
 
@@ -196,19 +209,19 @@ func (o *Bot) makeDecision(oldEvent *binance.WsAggTradeEvent) {
 		order = &models.Order{
 			Symbol:   newEvent.Symbol,
 			Price:    newEventPrice,
-			Quantity: 2 * tradeAmount / newEventPrice,
+			Quantity: 2 * o.tradeAmount / newEventPrice,
 		}
 	} else if difference < 99.70 {
 		order = &models.Order{
 			Symbol:   newEvent.Symbol,
 			Price:    newEventPrice,
-			Quantity: 1.5 * tradeAmount / newEventPrice,
+			Quantity: 1.5 * o.tradeAmount / newEventPrice,
 		}
 	} else if difference < 99.80 {
 		order = &models.Order{
 			Symbol:   newEvent.Symbol,
 			Price:    newEventPrice,
-			Quantity: tradeAmount / newEventPrice,
+			Quantity: o.tradeAmount / newEventPrice,
 		}
 	}
 
@@ -221,7 +234,7 @@ func (o *Bot) makeDecision(oldEvent *binance.WsAggTradeEvent) {
 	timeFromLastTrade := (time.Now().Unix() - o.lastTimeTrade)
 
 	// if enough time has passed since the last trade, reset lastTradePrice and lastTimeTrade.
-	if o.lastTimeTrade != 0 && timeFromLastTrade > timeUntilLastTradePriceWillReset {
+	if o.lastTimeTrade != 0 && timeFromLastTrade > o.timeUntilLastTradePriceWillReset {
 		o.rwm.Lock()
 		o.lastTradePrice = 0
 		o.lastTimeTrade = 0
@@ -229,18 +242,25 @@ func (o *Bot) makeDecision(oldEvent *binance.WsAggTradeEvent) {
 	}
 
 	// if order price >= stop price, skip trade.
-	if newEventPrice >= o.stopPrice {
-		log.Printf("order %v skip, price(%v) > o.stopPrice(%v)\n", order, order.Price, o.stopPrice)
+	if newEventPrice >= o.dayStopPrice {
+		log.Printf("order %v skip, price(%v) > o.dayStopPrice(%v)\n", order, order.Price, o.dayStopPrice)
+
+		return
+	}
+
+	// if order price >= stop price, skip trade.
+	if newEventPrice >= o.weekStopPrice {
+		log.Printf("order %v skip, price(%v) > o.weekStopPrice(%v)\n", order, order.Price, o.weekStopPrice)
 
 		return
 	}
 
 	// if sumOfOpenOrdersForLastDay > stopSumOfOpenOrdersForLastDay skip trade.
-	if o.sumOfOpenOrdersForLastDay > stopSumOfOpenOrdersForLastDay {
+	if o.sumOfOpenOrdersForLastDay > o.stopSumOfOpenOrdersForLastDay {
 		log.Printf("order: %v skip, the worth of open trades: %v > day limit: %v\n",
 			order,
 			o.sumOfOpenOrdersForLastDay,
-			stopSumOfOpenOrdersForLastDay,
+			o.stopSumOfOpenOrdersForLastDay,
 		)
 
 		return
@@ -315,7 +335,7 @@ func (o *Bot) trade() {
 
 		o.rwm.Lock()
 		o.lastTimeTrade = time.Now().Unix()
-		o.lastTradePrice = order.Price - (order.Price * profitPercent / 2)
+		o.lastTradePrice = order.Price - (order.Price * o.profitInPercent / 2)
 		o.rwm.Unlock()
 
 		go o.checkEntryOrder(firstOrderResolve, order)
@@ -367,7 +387,7 @@ func (o *Bot) checkEntryOrder(firstOrderResolve *binance.CreateOrderResponse, or
 
 	log.Printf("Order %v executed\n", order)
 
-	order.Price += order.Price * profitPercent
+	order.Price += order.Price * o.profitInPercent
 
 	for {
 		secondOrderResolve, err := o.createOrder(order, binance.SideTypeSell, binance.OrderTypeLimit, binance.TimeInForceTypeGTC)
@@ -431,7 +451,7 @@ func (o *Bot) createOrder(
 			Do(context.Background())
 
 	case binance.OrderTypeStopLoss:
-		stopLoss := int(order.Price - order.Price*profitPercent)
+		stopLoss := int(order.Price - order.Price*o.profitInPercent)
 
 		orderResponse, err = o.client.NewCreateOrderService().Symbol(order.Symbol).
 			Side(side).
@@ -521,7 +541,7 @@ func (o *Bot) checkLimitOrders() {
 					o.cache.SaveCache()
 
 					if o.lastTradePrice == 0 {
-						o.lastTradePrice = newlastTradePrice - newlastTradePrice*profitPercent
+						o.lastTradePrice = newlastTradePrice - newlastTradePrice*o.profitInPercent
 						o.lastTimeTrade = time.Now().Unix() - pauseAfterTrade
 					}
 					o.rwm.Unlock()
@@ -614,11 +634,11 @@ func (o *Bot) retryCreateOrder(order *models.Order) (*binance.CreateOrderRespons
 	return nil, nil, fmt.Errorf("number of attempts to create an order %v exceeded", order)
 }
 
-func (o *Bot) getStopPrice() {
+func (o *Bot) getStopPrice(stopPriceFilter *float64, tsStartInterval int64, interval string, ratioForStopPrice float64) {
 	for {
-		last24Hours := time.Now().UnixNano()/(int64(time.Millisecond)/int64(time.Nanosecond)) - millisecondInDay
+		startTS := time.Now().UnixNano()/(int64(time.Millisecond)/int64(time.Nanosecond)) - tsStartInterval
 
-		klines, err := o.client.NewKlinesService().Symbol(o.symbol).StartTime(last24Hours).Interval("15m").Do(context.Background())
+		klines, err := o.client.NewKlinesService().Symbol(o.symbol).StartTime(startTS).Interval("15m").Do(context.Background())
 		if err != nil {
 			log.Printf("o.client.NewKlinesService(%v) err: %v\n", o.symbol, err)
 			continue
@@ -653,10 +673,10 @@ func (o *Bot) getStopPrice() {
 			}
 		}
 
-		stopPrice := maxPrice - ((maxPrice - minPrice) * dailyChanneRatioForStopPrice)
+		stopPrice := maxPrice - ((maxPrice - minPrice) * ratioForStopPrice)
 
 		o.rwm.Lock()
-		o.stopPrice = stopPrice
+		*stopPriceFilter = stopPrice
 		o.rwm.Unlock()
 
 		time.Sleep(time.Minute * timeOutInMinForGetStopPrice)
@@ -727,13 +747,20 @@ func (o *Bot) SetStopPrice() func(http.ResponseWriter, *http.Request) {
 
 		stopPriceFloat, _ := strconv.ParseFloat(price, bitSize32)
 
-		o.stopPrice = stopPriceFloat
+		o.dayStopPrice = stopPriceFloat
 
 		_, err := resWriter.Write([]byte(fmt.Sprintf("stop price now %v", stopPriceFloat)))
 		if err != nil {
 			log.Printf("resWriter.Write() err: %v\n", err)
 		}
 	}
+}
+
+func (o *Bot) GetClient() *binance.Client {
+	o.rwm.RLock()
+	defer o.rwm.RUnlock()
+
+	return o.client
 }
 
 func (o *Bot) GetSymbol() string {
@@ -747,7 +774,14 @@ func (o *Bot) GetStopPrice() float64 {
 	o.rwm.RLock()
 	defer o.rwm.RUnlock()
 
-	return o.stopPrice
+	return o.dayStopPrice
+}
+
+func (o *Bot) GetWeeklyStopPrice() float64 {
+	o.rwm.RLock()
+	defer o.rwm.RUnlock()
+
+	return o.weekStopPrice
 }
 
 func (o *Bot) GetSumOfOpenOrders() float64 {
@@ -771,9 +805,44 @@ func (o *Bot) GetLastTradePrice() float64 {
 	return o.lastTradePrice
 }
 
-func (o *Bot) GetClient() *binance.Client {
+func (o *Bot) GetProfitInPercent() float64 {
 	o.rwm.RLock()
 	defer o.rwm.RUnlock()
 
-	return o.client
+	return o.profitInPercent
+}
+
+func (o *Bot) GetTradeAmount() float64 {
+	o.rwm.RLock()
+	defer o.rwm.RUnlock()
+
+	return o.tradeAmount
+}
+
+func (o *Bot) GetStopSumOfOpenOrdersForLastDay() float64 {
+	o.rwm.RLock()
+	defer o.rwm.RUnlock()
+
+	return o.stopSumOfOpenOrdersForLastDay
+}
+
+func (o *Bot) GetDailyRatioForStopPrice() float64 {
+	o.rwm.RLock()
+	defer o.rwm.RUnlock()
+
+	return o.dailyRatioForStopPrice
+}
+
+func (o *Bot) GetWeeklyRatioForStopPrice() float64 {
+	o.rwm.RLock()
+	defer o.rwm.RUnlock()
+
+	return o.weeklyRatioForStopPrice
+}
+
+func (o *Bot) GetTimeUntilLastTradePriceWillReset() int64 {
+	o.rwm.RLock()
+	defer o.rwm.RUnlock()
+
+	return o.timeUntilLastTradePriceWillReset
 }
