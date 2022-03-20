@@ -1,5 +1,21 @@
 # Bot configurations
-api-key: "OP185aWACBkcqpPVMVMsyUfHZuMdWCOmVAmH5fOVTsYhCKC9Y5qCmglTFJcmPkPE"
-secret-key: "qeSevC9FZ9aCTNVUVnMAEUwLcFyTXvaEoZM6yt0rmo2iDC3IvpaTKu1YL585PR0p"
+
+# binance api key
+api-key: ""
+# binance secret key
+secret-key: ""
+# use testnet or not
+use-test-net: false
+# trading pair
 symbol: "BTCBUSD"
+# port for bot
 port: "8080"
+
+# minimal trade amount
+trade-amount: 250.0
+# take profit in percent
+profit-in-percent: 0.01
+stop-sum-of-open-orders-for-last-day: 1800
+daily-ratio-for-stop-price: 0.50
+weekly-ratio-for-stop-price: 0.30
+time-until-last-trade-price-will-reset: 7200
