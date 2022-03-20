@@ -1,5 +1,5 @@
 # Bot configurations
-api-key: "iA6CnpnsLfL5YlsRFl4htn5yc1qc9tFs4rJppVOmqIXpRsv90V03ilLzbImfH4kY"
-secret-key: "B9l5KX5xshGoR8O298LBfJPsNotJw7AylvMjiLn4DdOhwKu0aUudTN1RZjPpAVTT"
-symbol: "BTCUSDT"
+api-key: "OP185aWACBkcqpPVMVMsyUfHZuMdWCOmVAmH5fOVTsYhCKC9Y5qCmglTFJcmPkPE"
+secret-key: "qeSevC9FZ9aCTNVUVnMAEUwLcFyTXvaEoZM6yt0rmo2iDC3IvpaTKu1YL585PR0p"
+symbol: "BTCBUSD"
 port: "8080"
