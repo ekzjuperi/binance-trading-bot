@@ -25,9 +25,27 @@ func GetParams(bot *b.Bot) func(http.ResponseWriter, *http.Request) {
 			log.Printf("GetParams() buf.WriteString(bot.GetSumOfOpenOrders()) err: %v\n", err)
 		}
 
-		_, err = buf.WriteString(fmt.Sprintf("Max daily sum of open orders: %v \n", bot.GetStopSumOfOpenOrdersForLastDay()))
+		_, err = buf.WriteString(fmt.Sprintf("Max daily sum of open orders: %v \n\n", bot.GetStopSumOfOpenOrdersForLastDay()))
 		if err != nil {
 			log.Printf("GetParams() buf.WriteString(bot.GetStopSumOfOpenOrdersForLastDay()) err: %v\n", err)
+		}
+
+		_, err = buf.WriteString(fmt.Sprintf("Last trade price: %v \n", bot.GetLastTradePrice()))
+		if err != nil {
+			log.Printf("GetParams() buf.WriteString(bot.GetLastTradePrice()) err: %v\n", err)
+		}
+
+		lastTimeTrade := bot.GetLastTimeTrade()
+		if lastTimeTrade == 0 {
+			_, err = buf.WriteString("Last time trade: 0\n\n")
+			if err != nil {
+				log.Printf("GetParams() buf.WriteString(bot.GetLastTimeTrade()) err: %v\n", err)
+			}
+		} else {
+			_, err = buf.WriteString(fmt.Sprintf("Last time trade: %v \n\n", time.Unix(bot.GetLastTimeTrade(), 0)))
+			if err != nil {
+				log.Printf("GetParams() buf.WriteString(bot.GetLastTimeTrade()) err: %v\n", err)
+			}
 		}
 
 		_, err = buf.WriteString(fmt.Sprintf("Calculated daily stop price: %v \n", bot.GetStopPrice()))
@@ -45,24 +63,9 @@ func GetParams(bot *b.Bot) func(http.ResponseWriter, *http.Request) {
 			log.Printf("GetParams() buf.WriteString(bot.GetDailyRatioForStopPrice()) err: %v\n", err)
 		}
 
-		_, err = buf.WriteString(fmt.Sprintf("Weekly ratio for stop price: %v \n", bot.GetWeeklyRatioForStopPrice()))
+		_, err = buf.WriteString(fmt.Sprintf("Weekly ratio for stop price: %v \n\n", bot.GetWeeklyRatioForStopPrice()))
 		if err != nil {
 			log.Printf("GetParams() buf.WriteString(bot.GetWeeklyRatioForStopPrice()) err: %v\n", err)
-		}
-
-		_, err = buf.WriteString(fmt.Sprintf("Last trade price: %v \n", bot.GetLastTradePrice()))
-		if err != nil {
-			log.Printf("GetParams() buf.WriteString(bot.GetLastTradePrice()) err: %v\n", err)
-		}
-
-		_, err = buf.WriteString(fmt.Sprintf("Last time trade: %v \n", time.Unix(bot.GetLastTimeTrade(), 0)))
-		if err != nil {
-			log.Printf("GetParams() buf.WriteString(bot.GetLastTimeTrade()) err: %v\n", err)
-		}
-
-		_, err = buf.WriteString(fmt.Sprintf("Profit in percent: %v \n", bot.GetProfitInPercent()))
-		if err != nil {
-			log.Printf("GetParams() buf.WriteString(bot.GetProfitInPercent()) err: %v\n", err)
 		}
 
 		_, err = buf.WriteString(fmt.Sprintf("Minimal trade amount: %v \n", bot.GetTradeAmount()))
@@ -70,7 +73,12 @@ func GetParams(bot *b.Bot) func(http.ResponseWriter, *http.Request) {
 			log.Printf("GetParams() buf.WriteString(bot.GetTradeAmount()) err: %v\n", err)
 		}
 
-		_, err = buf.WriteString(fmt.Sprintf("Time until last trade price will reset: %v \n", bot.GetTimeUntilLastTradePriceWillReset()))
+		_, err = buf.WriteString(fmt.Sprintf("Profit in percent: %v \n", bot.GetProfitInPercent()))
+		if err != nil {
+			log.Printf("GetParams() buf.WriteString(bot.GetProfitInPercent()) err: %v\n", err)
+		}
+
+		_, err = buf.WriteString(fmt.Sprintf("Time until last trade price will reset: %vs \n", bot.GetTimeUntilLastTradePriceWillReset()))
 		if err != nil {
 			log.Printf("GetParams() buf.WriteString(bot.GetTimeUntilLastTradePriceWillReset()) err: %v\n", err)
 		}

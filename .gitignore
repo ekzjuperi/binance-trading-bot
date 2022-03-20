@@ -5,6 +5,8 @@
 *.so
 *.dylib
 *binance-trading-bot
+*.json
+*.log
 
 # Test binary, built with `go test -c`
 *.test

@@ -15,7 +15,7 @@ type BotConfig struct {
 
 	TradeAmount                      float64 `yaml:"trade-amount"` // minimal trade amount
 	ProfitInPercent                  float64 `yaml:"profit-in-percent"`
-	StopSumOfOpenOrdersForLastDay    float64 `yaml:"stop-sum-of-open-orders-for-last-day:"`
+	StopSumOfOpenOrdersForLastDay    float64 `yaml:"stop-sum-of-open-orders-for-last-day"`
 	DailyRatioForStopPrice           float64 `yaml:"daily-ratio-for-stop-price"`
 	WeeklyRatioForStopPrice          float64 `yaml:"weekly-ratio-for-stop-price"`
 	TimeUntilLastTradePriceWillReset int64   `yaml:"time-until-last-trade-price-will-reset"`
