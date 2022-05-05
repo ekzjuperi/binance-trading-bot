@@ -66,13 +66,16 @@ func GetProfitStatictics() func(http.ResponseWriter, *http.Request) {
 		})
 
 		totalProfit := float64(0)
+		monthProfit := float64(0)
 		dayProfit := float64(0)
 
 		firstData := time.Unix((trades[0].ExiteOrder.UpdateTime / int64(time.Microsecond)), 0)
 
 		previousDay := firstData.Format("02-01-06")
+		previousMonth := firstData.Format("01-06")
 
 		currentDay := ""
+		currentMonth := ""
 
 		buf := new(bytes.Buffer)
 
@@ -85,11 +88,28 @@ func GetProfitStatictics() func(http.ResponseWriter, *http.Request) {
 			tm := time.Unix((trade.ExiteOrder.UpdateTime / int64(time.Microsecond)), 0)
 
 			currentDay = tm.Format("02-01-06")
+			currentMonth = tm.Format("01-06")
 
 			if currentDay != previousDay {
 				_, err = buf.WriteString(fmt.Sprintf("Day profit: %.2f\n\n", dayProfit))
 				if err != nil {
 					log.Printf("GetProfitStatictics() buf.WriteString(dayProfit) err: %v\n", err)
+				}
+
+				if currentMonth != previousMonth {
+					_, err = buf.WriteString(fmt.Sprintf("---------------------\nMonth %v \n", previousMonth))
+					if err != nil {
+						log.Printf("GetProfitStatictics() buf.WriteString(currentMonth) err: %v\n", err)
+					}
+
+					_, err = buf.WriteString(fmt.Sprintf("Month profit: %.2f\n---------------------\n\n\n", monthProfit))
+					if err != nil {
+						log.Printf("GetProfitStatictics() buf.WriteString(monthProfit) err: %v\n", err)
+					}
+
+					previousMonth = currentMonth
+
+					monthProfit = 0
 				}
 
 				_, err = buf.WriteString(fmt.Sprintf("Day %v \n", currentDay))
@@ -104,6 +124,7 @@ func GetProfitStatictics() func(http.ResponseWriter, *http.Request) {
 
 			totalProfit += trade.Profit
 			dayProfit += trade.Profit
+			monthProfit += trade.Profit
 
 			trade := fmt.Sprintf("%v quantity:%s profit: %.2f\n", tm.Format("02-01-06 15:04"), trade.ExiteOrder.ExecutedQuantity[:6], trade.Profit)
 
@@ -117,10 +138,20 @@ func GetProfitStatictics() func(http.ResponseWriter, *http.Request) {
 				if err != nil {
 					log.Printf("GetProfitStatictics() buf.WriteString(dayProfit) err: %v\n", err)
 				}
+
+				_, err = buf.WriteString(fmt.Sprintf("\n---------------------\nMonth %v \n", currentMonth))
+				if err != nil {
+					log.Printf("GetProfitStatictics() buf.WriteString(currentMonth) err: %v\n", err)
+				}
+
+				_, err = buf.WriteString(fmt.Sprintf("Month profit: %.2f\n---------------------\n\n", monthProfit))
+				if err != nil {
+					log.Printf("GetProfitStatictics() buf.WriteString(monthProfit) err: %v\n", err)
+				}
 			}
 		}
 
-		_, err = resWriter.Write([]byte(fmt.Sprintf("Total profit: %.2f\n", totalProfit)))
+		_, err = resWriter.Write([]byte(fmt.Sprintf("---------------------\nTotal profit: %.2f\n---------------------\n", totalProfit)))
 		if err != nil {
 			log.Printf("GetProfitStatictics() resWriter.Write(totalProfit) err: %v\n", err)
 		}

@@ -12,10 +12,10 @@ symbol: "BTCBUSD"
 port: "8080"
 
 # minimal trade amount
-trade-amount: 250.0
+trade-amount: 300.0
 # take profit in percent
 profit-in-percent: 0.01
-stop-sum-of-open-orders-for-last-day: 1800
+stop-sum-of-open-orders-for-last-day: 2000
 daily-ratio-for-stop-price: 0.50
-weekly-ratio-for-stop-price: 0.30
+weekly-ratio-for-stop-price: 0.50
 time-until-last-trade-price-will-reset: 7200

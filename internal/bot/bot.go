@@ -115,12 +115,12 @@ func (o *Bot) StartPricesStream() (chan struct{}, error) {
 		o.analysisChan <- event
 	}
 	errHandler := func(err error) {
-		log.Println(err)
+		log.Printf("StartPricesStream() err: %v\n", err)
 	}
 
 	doneC, _, err := binance.WsAggTradeServe(o.symbol, wsAggTradeHandler, errHandler)
 	if err != nil {
-		log.Println(err)
+		log.Printf("StartPricesStream() binance.WsAggTradeServe() err: %v\n", err)
 		return nil, err
 	}
 
@@ -144,9 +144,9 @@ func (o *Bot) analyze() {
 	oldEvent4 := <-o.analysisChan
 	oldEvent5 := <-o.analysisChan
 
-	price, _ := strconv.ParseFloat(oldEvent.Price, bitSize32)
-	o.lastTradePrice = price
-	o.lastTimeTrade = time.Now().Unix()
+	// price, _ := strconv.ParseFloat(oldEvent.Price, bitSize32)
+	// o.lastTradePrice = price
+	// o.lastTimeTrade = time.Now().Unix()
 
 	timer := time.NewTimer(time.Second * 120)
 	timer2 := time.NewTimer(time.Second * 90)
@@ -198,6 +198,16 @@ func (o *Bot) analyze() {
 }
 
 func (o *Bot) makeDecision(oldEvent *binance.WsAggTradeEvent) {
+	timeFromLastTrade := (time.Now().Unix() - o.lastTimeTrade)
+
+	// if enough time has passed since the last trade, reset lastTradePrice and lastTimeTrade.
+	if o.lastTimeTrade != 0 && timeFromLastTrade > o.timeUntilLastTradePriceWillReset {
+		o.rwm.Lock()
+		o.lastTradePrice = 0
+		o.lastTimeTrade = 0
+		o.rwm.Unlock()
+	}
+
 	newEvent := <-o.analysisChan
 	newEventPrice, _ := strconv.ParseFloat(newEvent.Price, bitSize32)
 	oldEventPrice, _ := strconv.ParseFloat(oldEvent.Price, bitSize32)
@@ -217,7 +227,7 @@ func (o *Bot) makeDecision(oldEvent *binance.WsAggTradeEvent) {
 			Price:    newEventPrice,
 			Quantity: 1.5 * o.tradeAmount / newEventPrice,
 		}
-	} else if difference < 99.80 {
+	} else if difference < 99.85 {
 		order = &models.Order{
 			Symbol:   newEvent.Symbol,
 			Price:    newEventPrice,
@@ -229,16 +239,6 @@ func (o *Bot) makeDecision(oldEvent *binance.WsAggTradeEvent) {
 
 	if order == nil {
 		return
-	}
-
-	timeFromLastTrade := (time.Now().Unix() - o.lastTimeTrade)
-
-	// if enough time has passed since the last trade, reset lastTradePrice and lastTimeTrade.
-	if o.lastTimeTrade != 0 && timeFromLastTrade > o.timeUntilLastTradePriceWillReset {
-		o.rwm.Lock()
-		o.lastTradePrice = 0
-		o.lastTimeTrade = 0
-		o.rwm.Unlock()
 	}
 
 	// if order price >= stop price, skip trade.
@@ -335,7 +335,7 @@ func (o *Bot) trade() {
 
 		o.rwm.Lock()
 		o.lastTimeTrade = time.Now().Unix()
-		o.lastTradePrice = order.Price - (order.Price * o.profitInPercent / 2)
+		o.lastTradePrice = order.Price - (order.Price * o.profitInPercent / 3)
 		o.rwm.Unlock()
 
 		go o.checkEntryOrder(firstOrderResolve, order)
@@ -373,8 +373,8 @@ func (o *Bot) checkEntryOrder(firstOrderResolve *binance.CreateOrderResponse, or
 			}
 
 			o.rwm.Lock()
-			o.lastTimeTrade = time.Now().Unix() - pauseAfterTrade
-			o.lastTradePrice = order.Price
+			o.lastTimeTrade = 0
+			o.lastTradePrice = 0
 			o.rwm.Unlock()
 
 			log.Printf("order %v canceled after timeout", order)
